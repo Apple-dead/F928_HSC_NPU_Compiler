@@ -3,19 +3,19 @@
 """
 bias_to_bram.py
 
-Read a bias text file, divide each bias by 128, expand every processed bias
+Read a bias text file, divide each bias by a configurable divisor, expand every processed bias
 into an L x L square matrix, pad the number of bias values to a multiple of 4,
 and write the result as a 32-bit word-granularity Xilinx COE file.
 
 Usage:
-    python bias_to_bram.py -length <side_length> <bias_file> <output_coe_file>
+    python bias_to_bram.py -length <side_length> [-move <divisor>] <bias_file> <output_coe_file>
 
 Example:
     python bias_to_bram.py -length 256 data/layer1_0_bias.txt coe/layer1_bias.coe
 
 Default behavior:
     - Bias numbers can be separated by spaces, commas, brackets, or newlines.
-    - Each bias is divided by 128.
+    - Each bias is divided by the -move value, defaulting to 128.
     - The divided value is floored by default, matching common quantized feature-map flow.
     - The result is first represented as signed int8 two's-complement bytes.
     - Every 4 consecutive bytes are packed into one 32-bit COE item.
@@ -60,9 +60,9 @@ def parse_numbers(path: Path) -> List[float]:
     return nums
 
 
-def quantize_after_div128(value: float, mode: str) -> int:
-    """Divide by 128 and convert to an integer according to the selected mode."""
-    scaled = value / 128.0
+def quantize_after_divisor(value: float, divisor: float, mode: str) -> int:
+    """Divide by divisor and convert to an integer according to the selected mode."""
+    scaled = value / divisor
 
     if mode == "floor":
         return math.floor(scaled)
@@ -98,6 +98,7 @@ def pad_to_multiple_of_4(values: List[float]) -> List[float]:
 def expand_biases_to_bytes(
     bias_values: Iterable[float],
     length: int,
+    divisor: float,
     round_mode: str,
     clamp: bool,
 ) -> List[int]:
@@ -109,7 +110,7 @@ def expand_biases_to_bytes(
     matrix_items = length * length
 
     for bias in bias_values:
-        q = quantize_after_div128(bias, round_mode)
+        q = quantize_after_divisor(bias, divisor, round_mode)
         byte_val = int_to_byte(q, clamp=clamp)
         items.extend([byte_val] * matrix_items)
 
@@ -155,7 +156,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Convert bias text data to 32-bit word-granularity BRAM COE. "
-            "Each bias is divided by 128, expanded to an LxL matrix, "
+            "Each bias is divided by -move, expanded to an LxL matrix, "
             "and the bias count is padded to a multiple of 4."
         )
     )
@@ -165,13 +166,19 @@ def build_argparser() -> argparse.ArgumentParser:
         required=True,
         help="Side length L of the square matrix generated for every bias.",
     )
+    parser.add_argument(
+        "-move",
+        type=float,
+        default=128.0,
+        help="Divisor applied to every bias value before integer conversion. Default: 128.",
+    )
     parser.add_argument("bias_file", type=Path, help="Input bias text file.")
     parser.add_argument("output_coe_file", type=Path, help="Output .coe file path.")
     parser.add_argument(
         "--round-mode",
         choices=("floor", "trunc", "round"),
         default="floor",
-        help="How to convert bias/128 to integer before writing int8 hex. Default: floor.",
+        help="How to convert bias/-move to integer before writing int8 hex. Default: floor.",
     )
     parser.add_argument(
         "--clamp",
@@ -200,6 +207,8 @@ def main() -> None:
 
     if args.length <= 0:
         raise ValueError("-length must be a positive integer.")
+    if args.move == 0:
+        raise ValueError("-move must not be zero.")
     if args.values_per_line <= 0:
         raise ValueError("--values-per-line must be a positive integer.")
     if not args.bias_file.is_file():
@@ -210,6 +219,7 @@ def main() -> None:
     byte_items = expand_biases_to_bytes(
         padded_biases,
         length=args.length,
+        divisor=args.move,
         round_mode=args.round_mode,
         clamp=args.clamp,
     )
@@ -220,6 +230,7 @@ def main() -> None:
     print(f"  input_bias_count   = {len(raw_biases)}")
     print(f"  padded_bias_count  = {len(padded_biases)}")
     print(f"  matrix_length      = {args.length}")
+    print(f"  divisor            = {args.move}")
     print(f"  byte_items         = {len(byte_items)}")
     print(f"  bram_words         = {len(words)} words, {args.word_bytes} byte(s)/word")
     print("  packing_rule       = low-address byte on the right / low 8 bits")

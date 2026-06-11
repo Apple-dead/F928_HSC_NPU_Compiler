@@ -43,7 +43,7 @@ def strip_comment(line: str) -> str:
 
 def parse_number_token(token: str, default_radix: int = 16) -> int:
     """解析数字 token；不会把 COE 中的 0D/0B/0C 误判为前缀。"""
-    t = token.strip().strip(",").strip()
+    t = token.strip().lstrip("\ufeff").strip(",").strip()
     if not t:
         raise ValueError("empty token")
 
