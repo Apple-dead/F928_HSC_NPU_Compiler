@@ -7,18 +7,18 @@
 说明：总 COE 输出 radix = 16。
 
 输入 COE 文件顺序:
-  [0] coe/image.coe
-  [1] coe/layer1_weight.coe
-  [2] coe/layer1_bias.coe
-  [3] coe/instr.coe
+  [0] coe\image.coe
+  [1] coe\layer1_weight.coe
+  [2] coe\layer1_bias.coe
+  [3] coe\instr.coe
 
 输出总 COE 文件:
-  target/all.coe
+  target\all.coe
 
 区域地址映射:
 --------------------------------------------------------------------------------
 region_index        = 0
-input_file          = coe/image.coe
+input_file          = coe\image.coe
 input_radix         = 16
 input_item_count    = 0x00010000 (65536)
 input_word_bytes    = 4
@@ -29,7 +29,7 @@ size_bytes          = 0x00040000 (262144)
 end_addr            = 0x0003FFFF (262143)
 --------------------------------------------------------------------------------
 region_index        = 1
-input_file          = coe/layer1_weight.coe
+input_file          = coe\layer1_weight.coe
 input_radix         = 16
 input_item_count    = 0x00000024 (36)
 input_word_bytes    = 4
@@ -40,7 +40,7 @@ size_bytes          = 0x00000090 (144)
 end_addr            = 0x0004008F (262287)
 --------------------------------------------------------------------------------
 region_index        = 2
-input_file          = coe/layer1_bias.coe
+input_file          = coe\layer1_bias.coe
 input_radix         = 16
 input_item_count    = 0x00010000 (65536)
 input_word_bytes    = 4
@@ -51,7 +51,7 @@ size_bytes          = 0x00040000 (262144)
 end_addr            = 0x0008008F (524431)
 --------------------------------------------------------------------------------
 region_index        = 3
-input_file          = coe/instr.coe
+input_file          = coe\instr.coe
 input_radix         = 16
 input_item_count    = 0x00000019 (25)
 input_word_bytes    = 4
