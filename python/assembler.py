@@ -12,11 +12,7 @@ from typing import Iterable, List
 CFG_OPCODE = 0x04000000
 END_WORD = 0xFC000000
 
-GENERAL_REGISTER_CODE = {
-    "R1": 0x20,
-    "R2": 0x40,
-    "R3": 0x60,
-}
+GENERAL_REGISTER_ID = {f"R{i}": i for i in range(1, 13)}
 
 SPECIAL_REGISTER_CODE = {
     "CONV_P_1": 0x02,
@@ -26,10 +22,16 @@ SPECIAL_REGISTER_CODE = {
     "MADD_P": 0x09,
 }
 
-COMPUTE_WORDS = {
-    ("CONV", ("R1", "R2", "R3")): 0x0C221800,
-    ("MADD", ("R1", "R2", "R3")): 0x1C221800,
-    ("RELU", ("R1", "R2")): 0x14220000,
+COMPUTE_OPCODE = {
+    "CONV": 0b000011,
+    "RELU": 0b000101,
+    "MADD": 0b000111,
+}
+
+COMPUTE_OPERAND_COUNT = {
+    "CONV": 3,
+    "RELU": 2,
+    "MADD": 3,
 }
 
 
@@ -57,15 +59,16 @@ def encode_cfg(operands: List[str]) -> int:
         reg, half, imm_text = operands
         reg = reg.upper()
         half = half.upper()
-        if reg not in GENERAL_REGISTER_CODE:
-            raise ValueError(f"CFG_REGISTER address form only supports R1/R2/R3, got {reg}")
+        if reg not in GENERAL_REGISTER_ID:
+            raise ValueError(f"CFG_REGISTER address form only supports R1-R12, got {reg}")
         if half not in ("LOW", "HIGH"):
             raise ValueError(f"address CFG half must be LOW or HIGH, got {half}")
         imm = parse_int(imm_text)
         if not 0 <= imm <= 0xFFFF:
             raise ValueError(f"CFG_REGISTER immediate out of uint16 range: {imm_text}")
-        reg_code = GENERAL_REGISTER_CODE[reg] + (1 if half == "HIGH" else 0)
-        return CFG_OPCODE | (reg_code << 16) | imm
+        rd = GENERAL_REGISTER_ID[reg]
+        subop = 1 if half == "HIGH" else 0
+        return CFG_OPCODE | (rd << 21) | (subop << 16) | imm
 
     if len(operands) == 2:
         reg, imm_text = operands
@@ -78,6 +81,23 @@ def encode_cfg(operands: List[str]) -> int:
         return CFG_OPCODE | (SPECIAL_REGISTER_CODE[reg] << 16) | imm
 
     raise ValueError(f"CFG_REGISTER expects 2 or 3 operands, got {operands}")
+
+
+def encode_compute(mnemonic: str, operands: List[str]) -> int:
+    expected_count = COMPUTE_OPERAND_COUNT[mnemonic]
+    if len(operands) != expected_count:
+        raise ValueError(f"{mnemonic} expects {expected_count} operand(s), got {operands}")
+
+    regs = [op.upper() for op in operands]
+    for reg in regs:
+        if reg not in GENERAL_REGISTER_ID:
+            raise ValueError(f"{mnemonic} only supports R1-R12 operands, got {reg}")
+
+    rs0 = GENERAL_REGISTER_ID[regs[0]]
+    rs1 = GENERAL_REGISTER_ID[regs[1]]
+    rs2 = GENERAL_REGISTER_ID[regs[2]] if len(regs) == 3 else 0
+    dtype = 0  # INT8, per current compiler pipeline and instruction manual.
+    return (COMPUTE_OPCODE[mnemonic] << 26) | (rs0 << 21) | (rs1 << 16) | (rs2 << 11) | (dtype << 8)
 
 
 def assemble_line(line: str) -> int | None:
@@ -99,10 +119,7 @@ def assemble_line(line: str) -> int | None:
             raise ValueError("END does not take operands")
         return END_WORD
     if mnemonic in ("CONV", "MADD", "RELU"):
-        key = (mnemonic, tuple(op.upper() for op in operands))
-        if key not in COMPUTE_WORDS:
-            raise ValueError(f"unsupported compute instruction operands: {mnemonic} {operands}")
-        return COMPUTE_WORDS[key]
+        return encode_compute(mnemonic, operands)
 
     raise ValueError(f"unsupported instruction: {mnemonic}")
 
@@ -144,4 +161,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

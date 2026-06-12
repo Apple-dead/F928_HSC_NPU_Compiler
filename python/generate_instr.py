@@ -25,13 +25,6 @@ OPERATOR_PATHS = {
     "relu": PROJECT_ROOT / "operator" / "relu" / "relu.py",
 }
 
-IR_ORDER = [
-    "layer1_conv.json",
-    "layer1_madd.json",
-    "layer1_relu.json",
-]
-
-
 def load_operator(op: str):
     path = OPERATOR_PATHS[op]
     if not path.is_file():
@@ -58,8 +51,13 @@ def build_asm(memory_plan: Dict[str, Any], ir_dir: Path) -> List[str]:
         "; Source: data/memory_plan.json + data/infer_ir/*.json",
         "",
     ]
-    for filename in IR_ORDER:
-        ir = read_json(ir_dir / filename)
+    ir_paths = sorted(ir_dir.glob("*.json"))
+    if not ir_paths:
+        raise FileNotFoundError(f"no infer IR JSON files found under {ir_dir}")
+    irs = [read_json(path) for path in ir_paths]
+    irs.sort(key=lambda item: int(item["order"]))
+
+    for ir in irs:
         op = ir["op"]
         module = load_operator(op)
         if asm and asm[-1] != "":
@@ -108,4 +106,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

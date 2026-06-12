@@ -5,6 +5,7 @@ cd "$(dirname "$0")"
 
 #========MODEL========
 MODEL_NAME="yolov2_fixed.pth"
+MODEL_PY_NAME="yolov2_14layer_quantized.py"
 
 #========PARAMETERS========
 BIAS_1_LENGTH=256
@@ -54,8 +55,8 @@ fi
 python ./python/extract_pth_params.py "./model/$MODEL_NAME" "./data/model_params/"
 
 #generate memory plan / IR / instructions
-python ./python/generate_memory_plan.py
-python ./python/extract_infer_ir.py
+python ./python/generate_memory_plan.py "$MODEL_PY_NAME"
+python ./python/extract_infer_ir.py "$MODEL_PY_NAME"
 python ./python/generate_instr.py
 
 #image to coe

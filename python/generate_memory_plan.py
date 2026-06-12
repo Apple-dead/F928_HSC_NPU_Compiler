@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
+import model_parser
 import npu_config as cfg
 
 
@@ -69,26 +71,22 @@ def validate_no_overlap(a_start: int, a_size: int, b_start: int, b_size: int, a_
         )
 
 
-def build_plan() -> Dict[str, Any]:
-    h = cfg.IMAGE_HEIGHT
-    w = cfg.IMAGE_WIDTH
-    in_ch = cfg.LAYER1_IN_CHANNELS
-    out_ch = cfg.LAYER1_OUT_CHANNELS
-    kernel = cfg.LAYER1_KERNEL_SIZE
+def instr_count_for_layers(layers: List[Dict[str, Any]]) -> int:
+    # conv: 9, madd: 8, relu: 7, END: 1 for the current non-fused pipeline.
+    return len(layers) * (9 + 8 + 7) + 1
+
+
+def build_plan(model_py: Path) -> Dict[str, Any]:
+    layers, _relu_cfg = model_parser.parse_model_layers(model_py)
 
     if cfg.IMAGE_SOURCE not in ("coe", "external"):
         raise ValueError('IMAGE_SOURCE must be "coe" or "external"')
-    if h % 8 != 0 or w % 8 != 0:
+    if cfg.IMAGE_HEIGHT % 8 != 0 or cfg.IMAGE_WIDTH % 8 != 0:
         raise ValueError("image height/width must be divisible by 8")
 
-    aligned_in_ch = aligned_channels(in_ch)
-    aligned_out_ch = aligned_channels(out_ch)
-
-    image_size = h * w * aligned_in_ch
-    weight_size = aligned_out_ch * aligned_in_ch * kernel * kernel
-    bias_size = h * w * aligned_out_ch
-    output_size = h * w * aligned_out_ch
-    instr_size = cfg.FIRST_STAGE_INSTR_COUNT * cfg.INSTR_WORD_BYTES
+    image_aligned_ch = aligned_channels(layers[0]["conv"]["in_channels"])
+    image_size = cfg.IMAGE_HEIGHT * cfg.IMAGE_WIDTH * image_aligned_ch
+    instr_size = instr_count_for_layers(layers) * cfg.INSTR_WORD_BYTES
 
     plan: Dict[str, Any] = {
         "config": {
@@ -97,18 +95,22 @@ def build_plan() -> Dict[str, Any]:
             "RUNTIME_BASE_ADDR": hex_addr(cfg.RUNTIME_BASE_ADDR),
             "IMAGE_BASE_ADDR": hex_addr(cfg.IMAGE_BASE_ADDR),
             "IMAGE_SOURCE": cfg.IMAGE_SOURCE,
+            "INFER_PARSE_MODE": cfg.INFER_PARSE_MODE,
+            "INFER_PARSE_LAYER_LIMIT": cfg.INFER_PARSE_LAYER_LIMIT,
+            "model_py": str(model_py),
         },
         "alignment_bytes": 4,
         "image": {
             "source": cfg.IMAGE_SOURCE,
             "addr": hex_addr(cfg.IMAGE_BASE_ADDR),
-            "channels": in_ch,
-            "aligned_channels": aligned_in_ch,
-            "shape_nchw": [1, in_ch, h, w],
-            "storage_shape_nchw": [1, aligned_in_ch, h, w],
+            "channels": layers[0]["conv"]["in_channels"],
+            "aligned_channels": image_aligned_ch,
+            "shape_nchw": [1, layers[0]["conv"]["in_channels"], cfg.IMAGE_HEIGHT, cfg.IMAGE_WIDTH],
+            "storage_shape_nchw": [1, image_aligned_ch, cfg.IMAGE_HEIGHT, cfg.IMAGE_WIDTH],
             "size_bytes": image_size,
             "file": "coe/image.coe" if cfg.IMAGE_SOURCE == "coe" else None,
         },
+        "model_layers": layers,
         "tensors": {},
         "init_regions": [],
         "runtime_regions": [],
@@ -121,46 +123,68 @@ def build_plan() -> Dict[str, Any]:
             raise ValueError("IMAGE_SOURCE=coe currently requires IMAGE_BASE_ADDR == INIT_BASE_ADDR")
         add_init_region(plan, "image", image_size, "coe/image.coe")
     else:
-        validate_no_overlap(
-            cfg.IMAGE_BASE_ADDR,
-            image_size,
-            cfg.INIT_BASE_ADDR,
-            weight_size + bias_size + instr_size,
-            "external image",
-            "init data",
-        )
+        validate_no_overlap(cfg.IMAGE_BASE_ADDR, image_size, cfg.INIT_BASE_ADDR, instr_size, "external image", "init data")
 
-    weight = add_init_region(plan, "layer1_weight", weight_size, "coe/layer1_weight.coe")
-    bias = add_init_region(plan, "layer1_bias", bias_size, "coe/layer1_bias.coe")
+    plan["tensors"]["image"] = plan["image"]
+
+    height = cfg.IMAGE_HEIGHT
+    width = cfg.IMAGE_WIDTH
+    input_tensor = "image"
+    for layer in layers:
+        idx = layer["layer_index"]
+        conv = layer["conv"]
+        layer_name = f"layer{idx}"
+        in_ch = conv["in_channels"]
+        out_ch = conv["out_channels"]
+        aligned_in_ch = aligned_channels(in_ch)
+        aligned_out_ch = aligned_channels(out_ch)
+        kh, kw = conv["kernel_size"]
+        out_h, out_w = model_parser.conv_output_hw(height, width, conv)
+
+        if idx == 1 and input_tensor == "image" and in_ch != plan["image"]["channels"]:
+            raise ValueError(f"{layer_name} in_channels does not match image channels")
+
+        weight_size = aligned_out_ch * aligned_in_ch * kh * kw
+        bias_size = out_h * out_w * aligned_out_ch
+        output_size = out_h * out_w * aligned_out_ch
+        weight = add_init_region(plan, f"{layer_name}_weight", weight_size, f"coe/{layer_name}_weight.coe")
+        bias = add_init_region(plan, f"{layer_name}_bias", bias_size, f"coe/{layer_name}_bias.coe")
+
+        plan["tensors"][f"{layer_name}_weight"] = {
+            "addr": weight["addr"],
+            "channels": {"in": in_ch, "out": out_ch},
+            "aligned_channels": {"in": aligned_in_ch, "out": aligned_out_ch},
+            "shape_oihw": [out_ch, in_ch, kh, kw],
+            "storage_shape_oihw": [aligned_out_ch, aligned_in_ch, kh, kw],
+            "size_bytes": weight_size,
+        }
+        plan["tensors"][f"{layer_name}_bias"] = {
+            "addr": bias["addr"],
+            "channels": out_ch,
+            "aligned_channels": aligned_out_ch,
+            "shape_nchw": [1, out_ch, out_h, out_w],
+            "storage_shape_nchw": [1, aligned_out_ch, out_h, out_w],
+            "size_bytes": bias_size,
+        }
+
+        for op_name in ("conv", "madd", "relu"):
+            tensor_name = f"{layer_name}_{op_name}_out"
+            runtime = add_runtime_region(
+                plan,
+                tensor_name,
+                output_size,
+                channels=out_ch,
+                aligned_channels=aligned_out_ch,
+                shape_nchw=[1, out_ch, out_h, out_w],
+                storage_shape_nchw=[1, aligned_out_ch, out_h, out_w],
+            )
+            plan["tensors"][tensor_name] = runtime
+
+        input_tensor = f"{layer_name}_relu_out"
+        height, width = out_h, out_w
+
     instr = add_init_region(plan, "instr", instr_size, "coe/instr.coe")
-
-    conv_out = add_runtime_region(
-        plan,
-        "layer1_conv_out",
-        output_size,
-        channels=out_ch,
-        aligned_channels=aligned_out_ch,
-        shape_nchw=[1, out_ch, h, w],
-        storage_shape_nchw=[1, aligned_out_ch, h, w],
-    )
-    madd_out = add_runtime_region(
-        plan,
-        "layer1_madd_out",
-        output_size,
-        channels=out_ch,
-        aligned_channels=aligned_out_ch,
-        shape_nchw=[1, out_ch, h, w],
-        storage_shape_nchw=[1, aligned_out_ch, h, w],
-    )
-    relu_out = add_runtime_region(
-        plan,
-        "layer1_relu_out",
-        output_size,
-        channels=out_ch,
-        aligned_channels=aligned_out_ch,
-        shape_nchw=[1, out_ch, h, w],
-        storage_shape_nchw=[1, aligned_out_ch, h, w],
-    )
+    plan["tensors"]["instr"] = instr
 
     init_end = plan["_next_init_addr"]
     if init_end > cfg.INIT_LIMIT_ADDR:
@@ -173,42 +197,26 @@ def build_plan() -> Dict[str, Any]:
             f"ending at {hex_addr(cfg.INIT_LIMIT_ADDR)}"
         )
 
-    plan["tensors"] = {
-        "image": plan["image"],
-        "layer1_weight": {
-            "addr": weight["addr"],
-            "channels": {"in": in_ch, "out": out_ch},
-            "aligned_channels": {"in": aligned_in_ch, "out": aligned_out_ch},
-            "shape_oihw": [out_ch, in_ch, kernel, kernel],
-            "storage_shape_oihw": [aligned_out_ch, aligned_in_ch, kernel, kernel],
-            "size_bytes": weight_size,
-        },
-        "layer1_bias": {
-            "addr": bias["addr"],
-            "channels": out_ch,
-            "aligned_channels": aligned_out_ch,
-            "shape_nchw": [1, out_ch, h, w],
-            "storage_shape_nchw": [1, aligned_out_ch, h, w],
-            "size_bytes": bias_size,
-        },
-        "layer1_conv_out": conv_out,
-        "layer1_madd_out": madd_out,
-        "layer1_relu_out": relu_out,
-        "instr": instr,
-    }
     plan["init_end_addr_exclusive"] = hex_addr(init_end)
     plan["runtime_end_addr_exclusive"] = hex_addr(plan["_next_runtime_addr"])
-
     del plan["_next_init_addr"]
     del plan["_next_runtime_addr"]
     return plan
 
 
 def main() -> None:
-    plan = build_plan()
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUT_PATH.write_text(json.dumps(plan, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(f"[OK] memory plan generated: {OUT_PATH}")
+    parser = argparse.ArgumentParser(description="Generate NPU memory plan from model structure")
+    parser.add_argument("model_py", help="model definition .py path or filename under ./model")
+    parser.add_argument("--out", default=str(OUT_PATH))
+    args = parser.parse_args()
+
+    model_py = model_parser.resolve_model_py(args.model_py)
+    plan = build_plan(model_py)
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(plan, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"[OK] memory plan generated: {out_path}")
+    print(f"     layers      = {len(plan['model_layers'])}")
     print(f"     init_end    = {plan['init_end_addr_exclusive']}")
     print(f"     runtime_end = {plan['runtime_end_addr_exclusive']}")
 
