@@ -39,6 +39,7 @@ clean() {
     ./coe/instr.coe \
     ./target/all.coe \
     ./target/all.coe.map.txt
+  find . -type d -name '__pycache__' -prune -exec rm -rf {} +
   echo "[CLEAN] done"
 }
 
