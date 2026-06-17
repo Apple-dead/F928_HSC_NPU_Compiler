@@ -35,9 +35,10 @@ merge.py
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 
 COE_HEADER_RE = re.compile(r"memory_initialization_radix\s*=\s*(\d+)\s*;?", re.IGNORECASE)
@@ -225,6 +226,35 @@ def parse_word_endian_list(text: str, expected_len: int) -> List[str]:
     return values
 
 
+def resolve_plan_file(path_text: str, base_dir: Path) -> Path:
+    path = Path(path_text)
+    if path.is_absolute():
+        return path
+    return base_dir / path
+
+
+def input_paths_from_memory_plan(memory_plan_path: Path, base_dir: Optional[Path]) -> Tuple[List[Path], List[dict]]:
+    """Read init_regions from memory_plan.json and return COE paths in planned order."""
+    plan = json.loads(memory_plan_path.read_text(encoding="utf-8"))
+    init_regions = plan.get("init_regions")
+    if not isinstance(init_regions, list) or not init_regions:
+        raise ValueError(f"{memory_plan_path}: missing non-empty init_regions")
+
+    plan_base_dir = base_dir if base_dir is not None else Path.cwd()
+    input_paths: List[Path] = []
+    region_infos: List[dict] = []
+    for idx, region in enumerate(init_regions):
+        if not isinstance(region, dict):
+            raise ValueError(f"{memory_plan_path}: init_regions[{idx}] is not an object")
+        file_text = region.get("file")
+        if not file_text:
+            raise ValueError(f"{memory_plan_path}: init_regions[{idx}] missing file")
+        input_paths.append(resolve_plan_file(str(file_text), plan_base_dir))
+        region_infos.append(region)
+
+    return input_paths, region_infos
+
+
 def write_map(
     path: Path,
     input_paths: List[Path],
@@ -265,14 +295,26 @@ def write_map(
             word_endian = r["word_endian"]
             radix = r["input_radix"]
             path_str = r["path"]
+            name = r.get("name")
+            plan_addr = r.get("plan_addr")
+            plan_size = r.get("plan_size")
+            plan_end = r.get("plan_end")
 
             f.write("-" * 80 + "\n")
             f.write(f"region_index        = {idx}\n")
+            if name is not None:
+                f.write(f"region_name         = {name}\n")
             f.write(f"input_file          = {path_str}\n")
             f.write(f"input_radix         = {radix}\n")
             f.write(f"input_item_count    = 0x{item_count:08X} ({item_count})\n")
             f.write(f"input_word_bytes    = {word_bytes}\n")
             f.write(f"input_word_endian   = {word_endian}\n")
+            if plan_addr is not None:
+                f.write(f"plan_start_addr     = {plan_addr}\n")
+            if plan_size is not None:
+                f.write(f"plan_size_bytes     = {plan_size}\n")
+            if plan_end is not None:
+                f.write(f"plan_end_exclusive  = {plan_end}\n")
             f.write(f"padding_before      = 0x{pad_before:08X} ({pad_before})\n")
             f.write(f"start_addr          = 0x{start:08X} ({start})\n")
             f.write(f"size_bytes          = 0x{size:08X} ({size})\n")
@@ -292,8 +334,23 @@ def main() -> None:
     )
     parser.add_argument(
         "coe_files",
-        nargs="+",
-        help="前 N-1 个为输入 COE，最后 1 个为输出总 COE。例如：xx1.coe xx2.coe target.coe",
+        nargs="*",
+        help=(
+            "手动模式：前 N-1 个为输入 COE，最后 1 个为输出总 COE；"
+            "memory-plan 模式：只传输出总 COE，输入 COE 从 init_regions 读取。"
+        ),
+    )
+    parser.add_argument(
+        "--memory-plan",
+        type=Path,
+        default=None,
+        help="读取 memory_plan.json 的 init_regions 顺序作为输入 COE 顺序。",
+    )
+    parser.add_argument(
+        "--memory-plan-base-dir",
+        type=Path,
+        default=None,
+        help="解析 init_regions[*].file 相对路径的基准目录，默认使用当前工作目录。",
     )
     parser.add_argument("--map-out", default=None, help="输出 map 文件路径。默认 <target.coe>.map.txt")
     parser.add_argument("--align", type=int, default=4, help="每个输入 COE 起始地址对齐字节数，默认 4")
@@ -338,7 +395,12 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if len(args.coe_files) < 2:
+    if args.memory_plan is not None and len(args.coe_files) != 1:
+        raise ValueError(
+            "使用 --memory-plan 时，位置参数只需要传输出 COE。\n"
+            "例如：python merge.py --memory-plan data/memory_plan.json target/all.coe"
+        )
+    if args.memory_plan is None and len(args.coe_files) < 2:
         raise ValueError(
             "至少需要 2 个位置参数：一个或多个输入 COE + 一个输出 COE。\n"
             "例如：python merge.py xx1.coe xx2.coe target.coe"
@@ -352,8 +414,13 @@ def main() -> None:
     if args.output_word_bytes <= 0:
         raise ValueError("--output-word-bytes 必须大于 0")
 
-    input_paths = [Path(p) for p in args.coe_files[:-1]]
-    output_path = Path(args.coe_files[-1])
+    region_infos: Optional[List[dict]] = None
+    if args.memory_plan is not None:
+        input_paths, region_infos = input_paths_from_memory_plan(args.memory_plan, args.memory_plan_base_dir)
+        output_path = Path(args.coe_files[0])
+    else:
+        input_paths = [Path(p) for p in args.coe_files[:-1]]
+        output_path = Path(args.coe_files[-1])
     map_path = Path(args.map_out) if args.map_out else Path(str(output_path) + ".map.txt")
 
     for p in input_paths:
@@ -397,6 +464,10 @@ def main() -> None:
         regions.append(
             {
                 "index": idx,
+                "name": region_infos[idx].get("name") if region_infos else None,
+                "plan_addr": region_infos[idx].get("addr") if region_infos else None,
+                "plan_size": region_infos[idx].get("size_bytes") if region_infos else None,
+                "plan_end": region_infos[idx].get("end_addr_exclusive") if region_infos else None,
                 "path": str(path),
                 "input_radix": input_radix,
                 "item_count": item_count,

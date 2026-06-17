@@ -513,6 +513,67 @@ weight_start_addr = 0x00040000
 
 ---
 
+### 4.6 bias 数据矩阵生成与内存排列方式
+
+当前 `bias_to_bram.py` 只支持 bias 个数 `<= 4` 的情况；如果 bias 个数大于 4，暂时保留为后续开发接口，不生成近似数据。
+
+bias 原始值先按构建脚本中的 `BIAS_1_MOVE` 做缩放：
+
+```text
+processed_bias = floor(raw_bias / BIAS_1_MOVE)
+```
+
+随后把处理后的 bias 转为 signed int8 的 8-bit 补码字节。若 bias 个数不足 4，则在末尾补 0，形成一个 4 通道 bias 组：
+
+```text
+[bias0, bias1, bias2, bias3]
+```
+
+其中补齐后的通道只作为 4 通道对齐占位，不参与有效输出通道计算。
+
+与旧规则不同，bias 不再按“每个 bias 单独生成一个 `L x L` 矩阵，然后多个矩阵依次排列”的方式写入。新的规则是：对 `L x L` 中的每一个空间位置，都连续写入同一组 4 通道 bias 字节。
+
+也就是说，内存中的 byte 顺序为：
+
+```text
+pixel0: bias0, bias1, bias2, bias3
+pixel1: bias0, bias1, bias2, bias3
+pixel2: bias0, bias1, bias2, bias3
+...
+```
+
+如果当前 3 个有效 bias 经过缩放后分别为：
+
+```text
+bias0 = 0x07
+bias1 = 0x06
+bias2 = 0x03
+bias3 = 0x00   # padding
+```
+
+则内存 byte 排列应为：
+
+```text
+07 06 03 00, 07 06 03 00, 07 06 03 00, ...
+```
+
+由于当前 COE 以 32-bit word 输出，并采用 little-endian 打包，即低地址 byte 位于 word 的低 8 位、显示在 32-bit 十六进制字符串右侧，因此 COE 中看到的 word 为：
+
+```text
+00030607,
+00030607,
+00030607,
+...
+```
+
+对于 `L = 256` 的情况，bias 区总字节数仍为：
+
+```text
+256 * 256 * 4 = 262144 bytes = 0x00040000
+```
+
+---
+
 ## 5. 当前第一层卷积样例的内存布局
 
 当前样例中，合并后的 BRAM 地址空间如下：

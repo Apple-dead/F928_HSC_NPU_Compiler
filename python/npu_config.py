@@ -14,12 +14,6 @@ IMAGE_WIDTH = 256
 # 1: parse the full model inference graph from the model .py.
 # 2: parse only the first INFER_PARSE_LAYER_LIMIT model layer(s).
 INFER_PARSE_MODE = 2
-INFER_PARSE_LAYER_LIMIT = 1
-
-CONV_START_POSITION = 9
-MADD_START_POSITION = 0
-
-
+INFER_PARSE_LAYER_LIMIT = 2
 
 INSTR_WORD_BYTES = 4
-FIRST_STAGE_INSTR_COUNT = 25
