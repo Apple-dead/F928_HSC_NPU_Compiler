@@ -17,6 +17,7 @@ GENERAL_REGISTER_ID = {f"R{i}": i for i in range(1, 13)}
 SPECIAL_REGISTER_CODE = {
     "CONV_P_1": 0x02,
     "CONV_P_2": 0x03,
+    "DSMP_P": 0x04,
     "RELU_P_1": 0x05,
     "RELU_P_2": 0x06,
     "MADD_P": 0x09,
@@ -24,12 +25,14 @@ SPECIAL_REGISTER_CODE = {
 
 COMPUTE_OPCODE = {
     "CONV": 0b000011,
+    "DSMP": 0b000100,
     "RELU": 0b000101,
     "MADD": 0b000111,
 }
 
 COMPUTE_OPERAND_COUNT = {
     "CONV": 3,
+    "DSMP": 2,
     "RELU": 2,
     "MADD": 3,
 }
@@ -118,7 +121,7 @@ def assemble_line(line: str) -> int | None:
         if operands:
             raise ValueError("END does not take operands")
         return END_WORD
-    if mnemonic in ("CONV", "MADD", "RELU"):
+    if mnemonic in ("CONV", "DSMP", "MADD", "RELU"):
         return encode_compute(mnemonic, operands)
 
     raise ValueError(f"unsupported instruction: {mnemonic}")
