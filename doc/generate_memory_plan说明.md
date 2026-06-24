@@ -9,23 +9,23 @@
 - 模型解析配置；
 - 输入图像尺寸和存储布局；
 - 每层 weight、bias、指令等初始化数据的地址和大小；
-- 每层 conv / 可选 dsmp / madd / relu 运行时输出缓冲区的地址和大小；
+- 每层 conv / 可选 dsmp / relu 运行时输出缓冲区的地址和大小；
 - 每层在当前 NPU 通道能力下的拆分执行计划。
 
 当前 NPU 卷积和矩阵计算单次最大处理通道数为 8，数据仍按 4 通道对齐。若某层输出通道数大于 8，`memory_plan.json` 会将该层拆成多个通道段，例如 12 输出通道拆成 8 + 4。
 
-当前输入通道数大于 4 的情况暂未支持，生成 memory plan 时会直接报错，留作后续扩展。
+当前卷积输入通道数最大支持 256，生成 memory plan 时若超过 256 会直接报错。
 
 当前 `generate_memory_plan.py` 的通道支持范围可以概括为：
 
-- 输入通道数 `<= 4`、输出通道数 `<= 4`：直接生成单个 4 通道对齐 split。
-- 输入通道数 `<= 4`、输出通道数 `> 4`：支持生成，按 NPU 单次最多 8 通道拆分，例如 12 输出通道拆成 8 + 4。
-- 输入通道数 `> 4`：暂不支持，直接报错，不生成近似或不完整的 memory plan。
+- 输入通道数 `<= 256`、输出通道数 `<= 8`：直接生成单个输出通道 split。
+- 输入通道数 `<= 256`、输出通道数 `> 8`：支持生成，按 NPU 单次最多 8 输出通道拆分，例如 12 输出通道拆成 8 + 4。
+- 输入通道数 `> 256`：不支持，直接报错，不生成近似或不完整的 memory plan。
 
 当前 stride / padding 支持范围为：
 
-- `stride = 1`：按普通 `conv -> madd -> relu` 规划。
-- `stride = 2, padding = 0`：按 `conv(stride=1) -> dsmp -> madd -> relu` 规划。
+- `stride = 1`：按普通 `conv -> relu` 规划，bias 由 CONV 指令自动处理。
+- `stride = 2, padding = 0`：按 `conv(stride=1) -> dsmp -> relu` 规划，bias 由 CONV 指令自动处理。
 - `stride > 2`：暂不支持，直接报错。
 - `stride = 2, padding != 0`：暂不支持，直接报错。
 
@@ -114,7 +114,6 @@ layer1_weight
 layer1_bias
 layer1_conv_out
 layer2_dsmp_out
-layer1_madd_out
 layer1_relu_out
 layer2_weight
 layer2_bias
@@ -145,14 +144,14 @@ size_bytes
 addr
 channels
 aligned_channels
-shape_nchw
-storage_shape_nchw
+shape
+storage_shape
 size_bytes
 ```
 
-`shape_nchw` 的 H/W 用于 `bias_to_bram_coe.py` 自动计算每个 bias 矩阵的大小。
+bias 不再展开为矩阵。`bias_to_bram_coe.py` 只读取通道数，把 bias 补 0 到 4 的倍数后按 signed int32 word 原样写出。
 
-### layerN_conv_out / layerN_dsmp_out / layerN_madd_out / layerN_relu_out
+### layerN_conv_out / layerN_dsmp_out / layerN_relu_out
 
 描述第 N 层每个运行时阶段的输出缓冲区：
 
@@ -165,7 +164,7 @@ shape_nchw
 storage_shape_nchw
 ```
 
-这些地址是后续生成 conv、madd、relu 指令时需要使用的输入输出地址。
+这些地址是后续生成 conv、dsmp、relu 指令时需要使用的输入输出地址。
 
 对于 `stride=2,padding=0` 的层，会额外生成：
 
@@ -173,7 +172,7 @@ storage_shape_nchw
 layerN_dsmp_out
 ```
 
-此时 `layerN_conv_out` 是 NPU stride=1 卷积后的完整尺寸中间结果，`layerN_dsmp_out` 才是模型语义上的 stride=2 输出结果。后续 `madd` 和 `relu` 都接在 `dsmp_out` 后面。
+此时 `layerN_conv_out` 是 NPU stride=1 卷积后的完整尺寸中间结果，`layerN_dsmp_out` 才是模型语义上的 stride=2 输出结果。后续 `relu` 接在 `dsmp_out` 后面。
 
 ## 5. execution_plan
 
@@ -207,7 +206,7 @@ padding = 0
 时，memory plan 会为该层规划额外的 DSMP 阶段：
 
 ```text
-conv(stride=1) -> dsmp -> madd -> relu
+conv(stride=1) -> dsmp -> relu
 ```
 
 例如 layer2 输入为 `256 x 256`，模型输出应为 `128 x 128`：
@@ -217,9 +216,6 @@ layer2_conv_out:
   shape = [1, 12, 256, 256]
 
 layer2_dsmp_out:
-  shape = [1, 12, 128, 128]
-
-layer2_madd_out:
   shape = [1, 12, 128, 128]
 
 layer2_relu_out:
@@ -235,7 +231,6 @@ layer2_relu_out:
 ```text
 conv_out
 dsmp_out   # 仅 stride=2,padding=0 的层存在
-madd_out
 relu_out
 ```
 
@@ -247,7 +242,7 @@ size_bytes
 layout
 ```
 
-规划方式是先为该层完整的卷积输出、矩阵加输出和 ReLU 输出分别预留总空间，然后每个 split 按通道段连续写入对应区域。
+规划方式是先为该层完整的卷积输出、可选下采样输出和 ReLU 输出分别预留总空间，然后每个 split 按通道段连续写入对应区域。
 
 例如第二层输出通道为 12，输入 feature map 为 `256 x 256`，DSMP 后输出 feature map 为 `128 x 128`，按 8 + 4 拆成两个 group：
 
@@ -265,7 +260,7 @@ group1 conv output:
   size  = 4 * 256 * 256 = 0x00040000 bytes
 ```
 
-因此 group1 的 conv 数据紧跟 group0 之后。`dsmp_out`、`madd_out` 和 `relu_out` 使用同样的紧密排列方式，但它们的空间尺寸是下采样后的 `128 x 128`。
+因此 group1 的 conv 数据紧跟 group0 之后。`dsmp_out` 和 `relu_out` 使用同样的紧密排列方式，但它们的空间尺寸是下采样后的 `128 x 128`。
 
 ### splits
 
@@ -290,7 +285,6 @@ offsets_bytes
 size_bytes
 conv
 dsmp   # 仅 stride=2,padding=0 的层存在
-madd
 relu
 ```
 
@@ -313,14 +307,15 @@ group0.weight = 0x00000000
 group1.weight = 0x00000080
 
 group0.bias   = 0x00000000
-group1.bias   = 0x00020000
+group1.bias   = 0x00000020
 ```
 
 对于 stride=2 的层：
 
 ```text
 conv_output 使用 NPU stride=1 的中间输出尺寸计算偏移。
-dsmp_output / bias / output 使用下采样后的真实输出尺寸计算偏移。
+dsmp_output / output 使用下采样后的真实输出尺寸计算偏移。
+bias 使用 int32 bias word 计算偏移。
 ```
 
 ### size_bytes
@@ -335,7 +330,7 @@ bias
 output
 ```
 
-其中 `conv_output` 按 NPU stride=1 中间图尺寸计算，`dsmp_output`、`bias` 和 `output` 按下采样后的输出矩阵大小计算。对于第二层：
+其中 `conv_output` 按 NPU stride=1 中间图尺寸计算，`dsmp_output` 和 `output` 按下采样后的输出矩阵大小计算，`bias` 按 32-bit bias word 计算。对于第二层：
 
 ```text
 group0.conv_output = 8 * 256 * 256 = 0x00080000 bytes
@@ -347,7 +342,7 @@ group1.output      = 4 * 128 * 128 = 0x00010000 bytes
 
 该字段与 `offsets_bytes` 配合，可以确认多个 group 在同一总预留区域中是紧密连续排列的。
 
-### conv / madd / relu
+### conv / dsmp / relu
 
 记录每个 split 对应的实际指令地址：
 
@@ -361,15 +356,11 @@ dsmp.output_addr
 dsmp.image_size
 dsmp.channels
 
-madd.input_addr
-madd.bias_addr
-madd.output_addr
-
 relu.input_addr
 relu.output_addr
 ```
 
-这些字段使后续 `generate_instr.py` 可以直接知道每一次卷积、矩阵加和激活要读写哪些地址。
+这些字段使后续 `generate_instr.py` 可以直接知道每一次卷积、下采样和激活要读写哪些地址。
 
 ## 6. init_regions 和 runtime_regions
 
@@ -402,11 +393,9 @@ file
 
 ```text
 layer1_conv_out
-layer1_madd_out
 layer1_relu_out
 layer2_conv_out
 layer2_dsmp_out
-layer2_madd_out
 layer2_relu_out
 ```
 

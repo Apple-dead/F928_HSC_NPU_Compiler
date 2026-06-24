@@ -17,6 +17,8 @@ GENERAL_REGISTER_ID = {f"R{i}": i for i in range(1, 13)}
 SPECIAL_REGISTER_CODE = {
     "CONV_P_1": 0x02,
     "CONV_P_2": 0x03,
+    "RCONV_LOW": 0x02,
+    "RCONV_HIGH": 0x03,
     "DSMP_P": 0x04,
     "RELU_P_1": 0x05,
     "RELU_P_2": 0x06,

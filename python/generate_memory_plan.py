@@ -72,13 +72,13 @@ def validate_no_overlap(a_start: int, a_size: int, b_start: int, b_size: int, a_
 
 
 def instr_count_for_layers(layers: List[Dict[str, Any]]) -> int:
-    # Per split: conv: 9, optional dsmp: 6, madd: 8, relu: 7. Plus END: 1.
+    # Per split: conv: 9, optional dsmp: 6, relu: 7. Plus END: 1.
     total = 1
     for layer in layers:
         conv = layer["conv"]
         aligned_out_ch = aligned_channels(conv["out_channels"])
         split_count = len(npu_channel_groups(conv["out_channels"], aligned_out_ch))
-        per_split = 9 + 8 + 7
+        per_split = 9 + 7
         if layer_needs_dsmp(conv):
             per_split += 6
         total += split_count * per_split
@@ -139,16 +139,14 @@ def build_layer_execution_plan(
     out_w: int,
     input_tensor: Dict[str, Any],
     weight_tensor: Dict[str, Any],
-    bias_tensor: Dict[str, Any],
     conv_out_tensor: Dict[str, Any],
     dsmp_out_tensor: Dict[str, Any] | None,
-    madd_out_tensor: Dict[str, Any],
     relu_out_tensor: Dict[str, Any],
     conv_out_h: int,
     conv_out_w: int,
 ) -> Dict[str, Any]:
-    if in_ch > 4:
-        raise NotImplementedError(f"{layer_name}: input channels > 4 are reserved for future development.")
+    if in_ch > 256:
+        raise NotImplementedError(f"{layer_name}: conv input channels > 256 are not supported by current NPU.")
 
     bytes_per_weight_output_channel = aligned_in_ch * kh * kw
     bytes_per_conv_feature_channel = conv_out_h * conv_out_w
@@ -169,38 +167,34 @@ def build_layer_execution_plan(
             "weight": weight_offset,
             "conv_output": conv_feature_offset,
             "dsmp_output": feature_offset if has_dsmp else None,
-            "bias": feature_offset,
+            "bias": start_channel * 4,
             "output": feature_offset,
         }
         item["size_bytes"] = {
             "weight": weight_size,
             "conv_output": conv_feature_size,
             "dsmp_output": feature_size if has_dsmp else None,
-            "bias": feature_size,
+            "bias": group["channels"] * 4,
             "output": feature_size,
         }
         item["conv"] = {
             "input_addr": input_tensor["addr"],
             "weight_addr": hex_addr(addr_to_int(weight_tensor["addr"]) + weight_offset),
             "output_addr": hex_addr(addr_to_int(conv_out_tensor["addr"]) + conv_feature_offset),
+            "has_bias": True,
         }
         if has_dsmp:
             item["dsmp"] = {
                 "input_addr": hex_addr(addr_to_int(conv_out_tensor["addr"]) + conv_feature_offset),
                 "output_addr": hex_addr(addr_to_int(dsmp_out_tensor["addr"]) + feature_offset),
                 "image_size": conv_out_h,
-                "channels": group["channels"],
+                "channels": group["valid_channels"],
             }
-            madd_input_addr = hex_addr(addr_to_int(dsmp_out_tensor["addr"]) + feature_offset)
+            relu_input_addr = hex_addr(addr_to_int(dsmp_out_tensor["addr"]) + feature_offset)
         else:
-            madd_input_addr = hex_addr(addr_to_int(conv_out_tensor["addr"]) + feature_offset)
-        item["madd"] = {
-            "input_addr": madd_input_addr,
-            "bias_addr": hex_addr(addr_to_int(bias_tensor["addr"]) + feature_offset),
-            "output_addr": hex_addr(addr_to_int(madd_out_tensor["addr"]) + feature_offset),
-        }
+            relu_input_addr = hex_addr(addr_to_int(conv_out_tensor["addr"]) + feature_offset)
         item["relu"] = {
-            "input_addr": hex_addr(addr_to_int(madd_out_tensor["addr"]) + feature_offset),
+            "input_addr": relu_input_addr,
             "output_addr": hex_addr(addr_to_int(relu_out_tensor["addr"]) + feature_offset),
         }
         splits.append(item)
@@ -234,11 +228,6 @@ def build_layer_execution_plan(
                 if dsmp_out_tensor is not None
                 else {}
             ),
-            "madd_out": {
-                "addr": madd_out_tensor["addr"],
-                "size_bytes": madd_out_tensor["size_bytes"],
-                "layout": "channel_groups_are_tightly_packed",
-            },
             "relu_out": {
                 "addr": relu_out_tensor["addr"],
                 "size_bytes": relu_out_tensor["size_bytes"],
@@ -322,7 +311,7 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
             raise ValueError(f"{layer_name} in_channels does not match image channels")
 
         weight_size = aligned_out_ch * aligned_in_ch * kh * kw
-        bias_size = out_h * out_w * aligned_out_ch
+        bias_size = aligned_out_ch * 4
         conv_output_size = conv_out_h * conv_out_w * aligned_out_ch
         output_size = out_h * out_w * aligned_out_ch
         weight = add_init_region(plan, f"{layer_name}_weight", weight_size, f"coe/{layer_name}_weight.coe")
@@ -342,9 +331,10 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
             "addr": bias["addr"],
             "channels": out_ch,
             "aligned_channels": aligned_out_ch,
-            "shape_nchw": [1, out_ch, out_h, out_w],
-            "storage_shape_nchw": [1, aligned_out_ch, out_h, out_w],
+            "shape": [out_ch],
+            "storage_shape": [aligned_out_ch],
             "size_bytes": bias_size,
+            "layout": "int32_bias_values_padded_to_4_channels_after_weight",
         }
         plan["tensors"][f"{layer_name}_bias"] = bias_tensor
 
@@ -354,12 +344,7 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
         ]
         if needs_dsmp:
             runtime_specs.append(("dsmp", output_size, out_h, out_w))
-        runtime_specs.extend(
-            [
-                ("madd", output_size, out_h, out_w),
-                ("relu", output_size, out_h, out_w),
-            ]
-        )
+        runtime_specs.append(("relu", output_size, out_h, out_w))
 
         for op_name, region_size, region_h, region_w in runtime_specs:
             tensor_name = f"{layer_name}_{op_name}_out"
@@ -388,10 +373,8 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
                 out_w=out_w,
                 input_tensor=plan["tensors"][input_tensor],
                 weight_tensor=weight_tensor,
-                bias_tensor=bias_tensor,
                 conv_out_tensor=runtime_tensors["conv"],
                 dsmp_out_tensor=runtime_tensors.get("dsmp"),
-                madd_out_tensor=runtime_tensors["madd"],
                 relu_out_tensor=runtime_tensors["relu"],
                 conv_out_h=conv_out_h,
                 conv_out_w=conv_out_w,

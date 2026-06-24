@@ -10,7 +10,6 @@ MODEL_PY_NAME="yolov2_14layer_quantized.py"
 #===========DATA=============
 IMAGE_PATH="./data/image.jpg"
 INSTR_PATH="./data/instr.txt"
-BIAS_MOVE_PATH="./data/bias_move.json"
 
 #===========COE=============
 IMAGE_COE_PATH="./coe/image.coe"
@@ -59,7 +58,7 @@ python ./python/image_to_bram_coe.py "$IMAGE_PATH" "$IMAGE_COE_PATH"
 python ./python/weight_to_bram_coe.py --memory-plan ./data/memory_plan.json --model-params ./data/model_params --out-dir ./coe
 
 #bias to coe
-python ./python/bias_to_bram_coe.py --memory-plan ./data/memory_plan.json --model-params ./data/model_params --out-dir ./coe --move "$BIAS_MOVE_PATH"
+python ./python/bias_to_bram_coe.py --memory-plan ./data/memory_plan.json --model-params ./data/model_params --out-dir ./coe
 
 #instr to coe
 python ./python/instr_txt_to_bram_coe.py "$INSTR_PATH" "$INSTR_COE_PATH"

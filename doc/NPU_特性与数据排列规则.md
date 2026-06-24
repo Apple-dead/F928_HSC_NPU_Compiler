@@ -2,9 +2,9 @@
 
 ## 1. 当前通道处理能力
 
-当前 NPU 的卷积和矩阵计算单次最大处理通道数为 8。
+当前 NPU 的卷积单次最大支持 256 个输入通道、8 个输出通道。卷积之外的 DSMP、ReLU、MADD 等算子当前单次最大处理通道数仍为 8。
 
-虽然配置寄存器字段中为通道数预留了 32 通道范围，但当前数据构建和指令生成阶段应按“单次最多 8 通道”处理。若某一层输出通道数超过 8，需要拆成多个通道段记录地址偏移，例如：
+若某一层输出通道数超过 8，需要拆成多个通道段记录地址偏移，例如：
 
 ```text
 3 -> 12 conv:
@@ -12,7 +12,7 @@
   group1: output channel 8..11
 ```
 
-第二段的起始地址偏移需要记录下来，后续卷积指令可据此选择对应的 weight / bias 起始地址。
+第二段的起始地址偏移需要记录下来，后续卷积指令可据此选择对应的 weight 起始地址。bias 数据紧跟对应 layer 的 weight 数据，NPU 根据卷积配置寄存器的 bias bit 自动读取。
 
 ## 1.1 结构信息来源
 
@@ -47,20 +47,20 @@ weight:
   addr
 
 bias:
-  shape_nchw          = [1, out_channel, output_h, output_w]
-  storage_shape_nchw  = [1, aligned_out_channel, output_h, output_w]
+  shape               = [out_channel]
+  storage_shape       = [aligned_out_channel]
   size_bytes
   addr
 
 execution_plan:
   channel group split
   weight/bias/runtime output offset
-  conv/dsmp/madd/relu address
+  conv/dsmp/relu address
 ```
 
 因此，`weight_to_bram_coe.py` 主要从 `memory_plan.json` 的 `layerN_weight.shape_oihw` 获取 `out_ch / in_ch / kernel_h / kernel_w`，再结合 `data/model_params/layerN_0_weight.txt` 中的权重数值生成 COE。
 
-`bias_to_bram_coe.py` 主要从 `memory_plan.json` 的 `layerN_bias.shape_nchw` 获取 `out_ch / output_h / output_w`，再结合 `data/model_params/layerN_0_bias.txt` 和 `data/bias_move.json` 中的缩放配置生成 COE。
+`bias_to_bram_coe.py` 主要从 `memory_plan.json` 的 `layerN_bias.channels / aligned_channels` 获取通道数，再结合 `data/model_params/layerN_0_bias.txt` 生成 COE。bias 不再读取 `data/bias_move.json`，不截位，也不展开成矩阵。
 
 ## 1.2 stride=2 卷积与下采样
 
@@ -76,7 +76,7 @@ padding = 0
 的软件卷积层时，不能只规划一次普通卷积输出。正确流程应为：
 
 ```text
-conv(stride=1) -> dsmp -> madd -> relu
+conv(stride=1) -> dsmp -> relu
 ```
 
 也就是说，普通卷积先输出与输入 feature map 相同空间尺寸的中间结果，然后使用 DSMP 下采样得到模型语义上的 stride=2 输出。
@@ -86,10 +86,10 @@ conv(stride=1) -> dsmp -> madd -> relu
 ```text
 NPU conv 输出尺寸  = 256 x 256
 DSMP 输出尺寸      = 128 x 128
-madd/relu 输入尺寸 = 128 x 128
+relu 输入尺寸      = 128 x 128
 ```
 
-DSMP 和 conv/madd/relu 一样按通道 group 执行，当前单次最多处理 8 通道。
+DSMP 和 ReLU 一样按通道 group 执行，当前单次最多处理 8 通道。
 
 当前暂不支持：
 
@@ -195,7 +195,7 @@ image_size_bytes = 256 * 256 * 4 = 262144 = 0x00040000
 
 生成 COE 时先将输入通道和输出通道分别补齐到 4 的倍数。
 
-当前输入通道数大于 4 的情况先保留为后续扩展接口。当前 `generate_memory_plan.py` 和 `weight_to_bram_coe.py` 都会在 `in_channels > 4` 时直接报错，不会生成可用的 memory plan 或 weight COE。
+当前卷积输入通道数最大支持 256。当前 `generate_memory_plan.py` 和 `weight_to_bram_coe.py` 都会在 `in_channels > 256` 时直接报错，不会生成可用的 memory plan 或 weight COE。
 
 对于输入通道小于 4 的情况，每个输出卷积核补足到 4 个输入卷积核。例如 `3 -> 12` 的第二层卷积，每个输出通道有 3 个有效输入卷积核，需要补 1 个全 0 卷积核。
 
@@ -239,53 +239,18 @@ group1: output channel 8..11, offset = 8 * padded_in_channel * kernel_h * kernel
 
 ## 6. bias 排列规则
 
-bias 个数等于卷积输出通道数，生成 COE 时先补齐到 4 的倍数。
+bias 个数等于卷积输出通道数，生成 COE 时先补齐到 4 的倍数，然后每个 bias 按 signed int32 原样写入一个 32-bit word，不截位、不除以 move，也不按输出 feature map 展开矩阵。
 
-每 4 个 bias 作为一组，对输出 feature map 的每个空间位置重复写入这 4 个 bias：
-
-```text
-pixel0: bias0, bias1, bias2, bias3
-pixel1: bias0, bias1, bias2, bias3
-pixel2: bias0, bias1, bias2, bias3
-...
-```
-
-当 bias 数量大于 4 时，也必须按每 4 个 bias 矩阵为一组进行排列。每一组内部采用元素交错排列；一组完整写完后，再写下一组。
-
-例如 `bias = 8` 时，应先生成前 4 个 bias 对应的矩阵数据：
+例如第一层有 3 个 bias：
 
 ```text
-pixel0: bias0, bias1, bias2, bias3
-pixel1: bias0, bias1, bias2, bias3
-pixel2: bias0, bias1, bias2, bias3
-...
+bias0
+bias1
+bias2
+0
 ```
 
-当前 4 个 bias 矩阵完整排列完以后，再生成后 4 个 bias 对应的矩阵数据：
-
-```text
-pixel0: bias4, bias5, bias6, bias7
-pixel1: bias4, bias5, bias6, bias7
-pixel2: bias4, bias5, bias6, bias7
-...
-```
-
-不能把 8 个 bias 矩阵一起按空间位置交错成：
-
-```text
-pixel0: bias0, bias1, bias2, bias3, bias4, bias5, bias6, bias7
-pixel1: bias0, bias1, bias2, bias3, bias4, bias5, bias6, bias7
-...
-```
-
-也就是说，bias COE 的通道展开粒度固定为 4，不是一次展开全部输出通道。
-
-如果 bias 数量超过 8，也按先 8 后 4 的方式记录通道段起始偏移。对于 12 个 bias：
-
-```text
-group0: bias channel 0..7,  offset = 0
-group1: bias channel 8..11, offset = 8 * output_h * output_w
-```
+这 4 个值直接作为 4 个 32-bit word 生成 `layer1_bias.coe`。memory plan 中 bias region 紧跟对应 layer 的 weight region，因此在最终 `target/all.coe` 中 bias 数据也紧跟卷积核数据。
 
 ## 7. 配置寄存器尺寸语义
 
@@ -307,7 +272,7 @@ CONV 配置寄存器中的图像大小字段写入 `feature_width / 8`。例如�
 block_image = 256 / 8 = 32
 ```
 
-CONV 配置中的通道数字段写真实模型通道数或当前 group 的有效执行通道数，不写补齐后的存储通道数。
+CONV 配置中的输入通道数字段写真实输入通道数，最大 256；输出通道数字段写当前 group 的执行通道数，当前最大 8。若该层有 bias，`condition_bias` 写 1，NPU 会自动读取紧跟在卷积核后的 bias 数据并完成相加。
 
 当前 `operator/conv/conv.py` 会检查 `width % 8 == 0`，然后写入：
 
@@ -315,25 +280,7 @@ CONV 配置中的通道数字段写真实模型通道数或当前 group 的有�
 block_image = width // 8
 ```
 
-### 7.2 MADD
-
-MADD 使用三个地址寄存器：
-
-```text
-R1 = 输入 feature map 起始地址
-R2 = 输出 feature map 起始地址
-R3 = bias 矩阵起始地址
-```
-
-MADD 配置寄存器中的图像大小字段同样写入 `feature_width / 8`。
-
-当前 `operator/madd/madd.py` 会检查 `width % 8 == 0`，然后写入：
-
-```text
-block_image = width // 8
-```
-
-### 7.3 DSMP
+### 7.2 DSMP
 
 DSMP 使用两个地址寄存器：
 
@@ -350,7 +297,7 @@ DSMP 配置寄存器中的 image size 写实际 feature map 边长，不除以 8
 RDSMP.image_size = image_size
 ```
 
-### 7.4 ReLU
+### 7.3 ReLU
 
 ReLU 使用两个地址寄存器：
 

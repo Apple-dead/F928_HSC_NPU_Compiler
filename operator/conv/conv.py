@@ -29,14 +29,21 @@ def split_u32(value: int) -> Tuple[int, int]:
     return value & 0xFFFF, (value >> 16) & 0xFFFF
 
 
-def encode_rconv(kernel_size: List[int], width: int, start_position: int, input_channels: int, output_channels: int) -> int:
+def encode_rconv(
+    kernel_size: List[int],
+    width: int,
+    start_position: int,
+    input_channels: int,
+    output_channels: int,
+    has_bias: bool,
+) -> int:
     kernel_key = tuple(kernel_size)
     if kernel_key not in KERNEL_SIZE_TO_CODE:
         raise ValueError(f"unsupported conv kernel_size: {kernel_size}")
     if width % 8 != 0:
         raise ValueError(f"conv feature width must be divisible by 8, got {width}")
-    if not 1 <= input_channels <= 4:
-        raise ValueError(f"conv input channels must be <= 4, got {input_channels}")
+    if not 1 <= input_channels <= 256:
+        raise ValueError(f"conv input channels must be <= 256, got {input_channels}")
     if not 1 <= output_channels <= 8:
         raise ValueError(f"conv output channels per pass must be <= 8, got {output_channels}")
     if not 0 <= start_position <= 31:
@@ -50,8 +57,9 @@ def encode_rconv(kernel_size: List[int], width: int, start_position: int, input_
         (KERNEL_SIZE_TO_CODE[kernel_key] << 30)
         | ((block_image - 1) << 24)
         | (start_position << 19)
-        | ((input_channels - 1) << 14)
-        | ((output_channels - 1) << 9)
+        | ((input_channels - 1) << 11)
+        | ((output_channels - 1) << 6)
+        | ((1 if has_bias else 0) << 5)
     )
 
 
@@ -68,6 +76,7 @@ def compile_op(op_plan: Dict[str, Any], memory_plan: Dict[str, Any]) -> List[str
         start_position=int(op_plan["start_position"]),
         input_channels=int(op_plan["input_channels"]),
         output_channels=int(op_plan["output_channels"]),
+        has_bias=bool(op_plan.get("has_bias", False)),
     )
     low16, high16 = split_u32(rconv)
 
