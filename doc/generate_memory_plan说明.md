@@ -134,7 +134,7 @@ storage_shape_oihw
 size_bytes
 ```
 
-`shape_oihw` 是模型原始权重形状，`storage_shape_oihw` 是按 4 通道补齐后的存储形状。
+`shape_oihw` 是模型原始权重形状，`storage_shape_oihw` 是 weight COE 的实际存储形状：输出通道保持有效输出通道数，输入通道补齐到 4 的倍数。`aligned_output_channels` 仍用于 bias、运行时输出和 split 对齐。
 
 ### layerN_bias
 

@@ -159,7 +159,7 @@ def build_layer_execution_plan(
         weight_offset = start_channel * bytes_per_weight_output_channel
         conv_feature_offset = start_channel * bytes_per_conv_feature_channel
         feature_offset = start_channel * bytes_per_feature_channel
-        weight_size = group["channels"] * bytes_per_weight_output_channel
+        weight_size = group["valid_channels"] * bytes_per_weight_output_channel
         conv_feature_size = group["channels"] * bytes_per_conv_feature_channel
         feature_size = group["channels"] * bytes_per_feature_channel
         item = dict(group)
@@ -310,7 +310,7 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
         if idx == 1 and input_tensor == "image" and in_ch != plan["image"]["channels"]:
             raise ValueError(f"{layer_name} in_channels does not match image channels")
 
-        weight_size = aligned_out_ch * aligned_in_ch * kh * kw
+        weight_size = out_ch * aligned_in_ch * kh * kw
         bias_size = aligned_out_ch * 4
         conv_output_size = conv_out_h * conv_out_w * aligned_out_ch
         output_size = out_h * out_w * aligned_out_ch
@@ -322,7 +322,7 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
             "channels": {"in": in_ch, "out": out_ch},
             "aligned_channels": {"in": aligned_in_ch, "out": aligned_out_ch},
             "shape_oihw": [out_ch, in_ch, kh, kw],
-            "storage_shape_oihw": [aligned_out_ch, aligned_in_ch, kh, kw],
+            "storage_shape_oihw": [out_ch, aligned_in_ch, kh, kw],
             "size_bytes": weight_size,
         }
         plan["tensors"][f"{layer_name}_weight"] = weight_tensor

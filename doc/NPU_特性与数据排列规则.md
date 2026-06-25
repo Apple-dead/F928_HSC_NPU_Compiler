@@ -42,7 +42,7 @@ padding
 ```text
 weight:
   shape_oihw          = [out_channel, in_channel, kernel_h, kernel_w]
-  storage_shape_oihw  = [aligned_out_channel, aligned_in_channel, kernel_h, kernel_w]
+  storage_shape_oihw  = [out_channel, aligned_in_channel, kernel_h, kernel_w]
   size_bytes
   addr
 
@@ -104,7 +104,7 @@ stride = 2 且 padding != 0
 
 NPU 数据在内存中统一按 4 通道为一组进行对齐。
 
-无论是图像、权重还是 bias，只要有效通道数不足 4 的倍数，都需要补 0 到 4 的倍数：
+图像、bias 和运行时输出 feature map 只要有效通道数不足 4 的倍数，都需要补 0 到 4 的倍数；卷积权重只补输入通道，不为虚拟输出通道写入整组 0 kernel：
 
 ```text
 3 channels  -> 4 channels
@@ -193,33 +193,33 @@ image_size_bytes = 256 * 256 * 4 = 262144 = 0x00040000
 [out_channel, in_channel, kernel_h, kernel_w]
 ```
 
-生成 COE 时先将输入通道和输出通道分别补齐到 4 的倍数。
+生成 weight COE 时只将输入通道补齐到 4 的倍数，输出通道维度保持模型中的有效输出通道数，不再为补齐出来的虚拟输出通道额外写入整组全 0 卷积核。
 
 当前卷积输入通道数最大支持 256。当前 `generate_memory_plan.py` 和 `weight_to_bram_coe.py` 都会在 `in_channels > 256` 时直接报错，不会生成可用的 memory plan 或 weight COE。
 
-对于输入通道小于 4 的情况，每个输出卷积核补足到 4 个输入卷积核。例如 `3 -> 12` 的第二层卷积，每个输出通道有 3 个有效输入卷积核，需要补 1 个全 0 卷积核。
+对于输入通道小于 4 的情况，每个有效输出卷积核补足到 4 个输入卷积核。例如 `3 -> 12` 的第二层卷积，每个输出通道有 3 个有效输入卷积核，需要补 1 个全 0 输入卷积核。
 
-对于输出通道不是 4 的倍数的情况，不仅要在逻辑上补齐输出通道，还必须把补出来的全 0 输出卷积核真实写入 weight COE。
+对于输出通道不是 4 的倍数的情况，输出 feature map、bias 和运行时区域仍按 4 通道对齐；但 weight COE 中只包含有效输出通道对应的卷积核，不包含虚拟输出通道对应的全 0 kernel。
 
-例如 `in_channels = 3`、`out_channels = 3`、`kernel = 3x3` 时，原始模型只有：
+例如 `in_channels = 3`、`out_channels = 3`、`kernel = 3x3` 时，原始模型有：
 
 ```text
 3 output channels * 3 input channels = 9 个有效输入卷积核
 ```
 
-但内存中需要按如下形状存储：
+weight COE 中实际存储为：
 
 ```text
-padded_weight[4][4][3][3]
+padded_weight[3][4][3][3]
 ```
 
-也就是说，每个有效输出通道都要补 1 个全 0 输入卷积核，同时还要额外补 1 个全 0 输出通道。最终 COE 中应包含：
+也就是说，每个有效输出通道都要补 1 个全 0 输入卷积核，但不再额外补第 4 个全 0 输出通道。最终 weight COE 中包含：
 
 ```text
-4 output channels * 4 input channels = 16 组卷积核
+3 output channels * 4 input channels = 12 组卷积核
 ```
 
-补齐后的输出通道只用于内存布局占位，不参与有效计算，但它对应的全 0 卷积核数据必须出现在 COE 中，保证后续通道组地址偏移和 memory plan 中的 `storage_shape_oihw` 一致。
+补齐后的输出通道只用于输出 feature map、bias 和运行时区域占位，不参与有效计算，也不对应 weight COE 中的整组全 0 卷积核。
 
 每个输出卷积核内部按如下顺序写入：
 
