@@ -28,6 +28,7 @@ clean() {
     ./coe/image.coe \
     ./coe/layer*_weight.coe \
     ./coe/layer*_bias.coe \
+    ./coe/layer*_params.coe \
     ./coe/instr.coe \
     ./target/all.coe \
     ./target/all.coe.map.txt
@@ -54,11 +55,8 @@ python ./python/generate_instr.py
 #image to coe
 python ./python/image_to_bram_coe.py "$IMAGE_PATH" "$IMAGE_COE_PATH"
 
-#weight to coe
-python ./python/weight_to_bram_coe.py --memory-plan ./data/memory_plan.json --model-params ./data/model_params --out-dir ./coe
-
-#bias to coe
-python ./python/bias_to_bram_coe.py --memory-plan ./data/memory_plan.json --model-params ./data/model_params --out-dir ./coe
+#interleaved weight/bias parameter coe
+python ./python/params_to_bram_coe.py --memory-plan ./data/memory_plan.json --model-params ./data/model_params --out-dir ./coe
 
 #instr to coe
 python ./python/instr_txt_to_bram_coe.py "$INSTR_PATH" "$INSTR_COE_PATH"

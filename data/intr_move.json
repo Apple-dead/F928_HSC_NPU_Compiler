@@ -2,7 +2,7 @@
   "CONV_MOVE_BY_LAYER": {
     "1": 512,
     "2": 64,
-    "3": 32
+    "3": 256
   },
   "MADD_MOVE_BY_LAYER": {
     "1": 0,

@@ -409,3 +409,11 @@ runtime_end_addr_exclusive
 ```
 
 这两个字段分别表示初始化区和运行时区当前规划后的结束地址，用于检查是否越界或与其他区域冲突。
+
+## 8. 参数区分组布局（当前实现）
+
+`init_regions` 对每层使用单一的 `layerN_params` 项，替代原先分离的 `layerN_weight` 和 `layerN_bias` 项。其地址为原 weight 起始地址，大小为原 weight+bias 之和。
+
+`execution_plan.splits` 中的 `offsets_bytes.weight` 和 `conv.weight_addr` 使用参数区物理偏移：每个最多 8 通道 group 先存有效 weight，再存补齐到 4 通道边界的 int32 bias。因此后续 group 的 weight 偏移会跨过前一 group 的 bias；`bias_addr` 记录该 group 自动 bias 读取的起始位置。
+
+运行时 `conv_out`、`dsmp_out`、`relu_out` 仍按 output channel 的 feature-map 大小计算偏移，group 的矩阵在预留区中按通道顺序连续存放。

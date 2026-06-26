@@ -317,3 +317,26 @@ RRELU.feature_size = feature_size
 ```
 
 因此当前 ReLU 生成代码符合该规则。
+
+## 5.1 参数区分组布局（当前实现）
+
+每层初始化参数区为 `layerN_params`，其起始地址等于旧 `layerN_weight` 的起始地址，大小仍等于原 weight 区与 bias 区大小之和。输出通道按最多 8 个有效通道分组，每组物理排列为：
+
+```text
+该组有效输出通道的 weight -> 该组 bias（补 0 到 4 的倍数）
+```
+
+例如 `3 -> 12`（输入通道补齐到 4、卷积核为 2x2）为：
+
+```text
+group0: W0..W7 -> B0..B7
+group1: W8..W11 -> B8..B11
+```
+
+`3 -> 9` 为：
+
+```text
+W0..W7 -> B0..B7 -> W8 -> B8,0,0,0
+```
+
+因此后一组 CONV 的 weight 地址必须包含此前各组的 weight 和 bias 大小；CONV 指令数量、顺序和每层参数区总占用不变。

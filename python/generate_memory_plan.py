@@ -154,12 +154,17 @@ def build_layer_execution_plan(
     has_dsmp = dsmp_out_tensor is not None
     splits: List[Dict[str, Any]] = []
 
+    # Physical parameter layout is, per group: valid weights then padded bias.
+    # A later group must therefore skip the preceding group's bias words.
+    parameter_offset = 0
     for group in npu_channel_groups(out_ch, aligned_out_ch):
         start_channel = group["start_channel"]
-        weight_offset = start_channel * bytes_per_weight_output_channel
         conv_feature_offset = start_channel * bytes_per_conv_feature_channel
         feature_offset = start_channel * bytes_per_feature_channel
         weight_size = group["valid_channels"] * bytes_per_weight_output_channel
+        bias_size = group["channels"] * 4
+        weight_offset = parameter_offset
+        bias_offset = weight_offset + weight_size
         conv_feature_size = group["channels"] * bytes_per_conv_feature_channel
         feature_size = group["channels"] * bytes_per_feature_channel
         item = dict(group)
@@ -167,14 +172,14 @@ def build_layer_execution_plan(
             "weight": weight_offset,
             "conv_output": conv_feature_offset,
             "dsmp_output": feature_offset if has_dsmp else None,
-            "bias": start_channel * 4,
+            "bias": bias_offset,
             "output": feature_offset,
         }
         item["size_bytes"] = {
             "weight": weight_size,
             "conv_output": conv_feature_size,
             "dsmp_output": feature_size if has_dsmp else None,
-            "bias": group["channels"] * 4,
+            "bias": bias_size,
             "output": feature_size,
         }
         item["conv"] = {
@@ -183,6 +188,7 @@ def build_layer_execution_plan(
             "output_addr": hex_addr(addr_to_int(conv_out_tensor["addr"]) + conv_feature_offset),
             "has_bias": True,
         }
+        item["bias_addr"] = hex_addr(addr_to_int(weight_tensor["addr"]) + bias_offset)
         if has_dsmp:
             item["dsmp"] = {
                 "input_addr": hex_addr(addr_to_int(conv_out_tensor["addr"]) + conv_feature_offset),
@@ -198,6 +204,14 @@ def build_layer_execution_plan(
             "output_addr": hex_addr(addr_to_int(relu_out_tensor["addr"]) + feature_offset),
         }
         splits.append(item)
+        parameter_offset += weight_size + bias_size
+
+    expected_parameter_size = out_ch * bytes_per_weight_output_channel + aligned_out_ch * 4
+    if parameter_offset != expected_parameter_size:
+        raise ValueError(
+            f"{layer_name}: parameter layout size mismatch: "
+            f"groups={parameter_offset}, expected={expected_parameter_size}"
+        )
 
     return {
         "layer": layer_name,
@@ -312,31 +326,38 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
 
         weight_size = out_ch * aligned_in_ch * kh * kw
         bias_size = aligned_out_ch * 4
+        parameter_size = weight_size + bias_size
         conv_output_size = conv_out_h * conv_out_w * aligned_out_ch
         output_size = out_h * out_w * aligned_out_ch
-        weight = add_init_region(plan, f"{layer_name}_weight", weight_size, f"coe/{layer_name}_weight.coe")
-        bias = add_init_region(plan, f"{layer_name}_bias", bias_size, f"coe/{layer_name}_bias.coe")
+        params = add_init_region(plan, f"{layer_name}_params", parameter_size, f"coe/{layer_name}_params.coe")
 
         weight_tensor = {
-            "addr": weight["addr"],
+            "addr": params["addr"],
             "channels": {"in": in_ch, "out": out_ch},
             "aligned_channels": {"in": aligned_in_ch, "out": aligned_out_ch},
             "shape_oihw": [out_ch, in_ch, kh, kw],
             "storage_shape_oihw": [out_ch, aligned_in_ch, kh, kw],
             "size_bytes": weight_size,
+            "parameter_region": f"{layer_name}_params",
         }
         plan["tensors"][f"{layer_name}_weight"] = weight_tensor
 
         bias_tensor = {
-            "addr": bias["addr"],
+            "addr": params["addr"],
             "channels": out_ch,
             "aligned_channels": aligned_out_ch,
             "shape": [out_ch],
             "storage_shape": [aligned_out_ch],
             "size_bytes": bias_size,
-            "layout": "int32_bias_values_padded_to_4_channels_after_weight",
+            "parameter_region": f"{layer_name}_params",
+            "layout": "int32_bias_values_padded_per_8_channel_weight_group",
         }
         plan["tensors"][f"{layer_name}_bias"] = bias_tensor
+        plan["tensors"][f"{layer_name}_params"] = {
+            "addr": params["addr"],
+            "size_bytes": parameter_size,
+            "layout": "weight_then_padded_int32_bias_per_group_of_at_most_8_output_channels",
+        }
 
         runtime_tensors: Dict[str, Dict[str, Any]] = {}
         runtime_specs = [
