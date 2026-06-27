@@ -23,7 +23,6 @@ DEFAULT_TXT = PROJECT_ROOT / "data" / "instr.txt"
 OPERATOR_PATHS = {
     "conv": PROJECT_ROOT / "operator" / "conv" / "conv.py",
     "dsmp": PROJECT_ROOT / "operator" / "dsmp" / "dsmp.py",
-    "madd": PROJECT_ROOT / "operator" / "madd" / "madd.py",
     "relu": PROJECT_ROOT / "operator" / "relu" / "relu.py",
 }
 
@@ -65,7 +64,7 @@ def move_to_start_position(move: int | float, *, layer: int, op: str) -> int:
 def load_intr_moves(path: Path) -> Dict[str, Dict[int, int]]:
     data = read_json(path)
     result: Dict[str, Dict[int, int]] = {}
-    for field in ("CONV_MOVE_BY_LAYER", "MADD_MOVE_BY_LAYER"):
+    for field in ("CONV_MOVE_BY_LAYER",):
         raw = data.get(field)
         if not isinstance(raw, dict):
             raise ValueError(f"{path} must contain object field {field}")
@@ -111,7 +110,8 @@ def build_op_plan(
                 "kernel_size": layer_plan["kernel_size"],
                 "feature_size": layer_plan["conv_output_hw"][1],
                 "input_channels": layer_plan["input_channels"],
-                "output_channels": split["channels"],
+                "output_channels": split["valid_channels"],
+                "has_bias": bool(split["conv"].get("has_bias", False)),
                 "start_position": get_start_position(intr_moves, "CONV_MOVE_BY_LAYER", layer, "conv"),
             }
         )
@@ -121,23 +121,12 @@ def build_op_plan(
         common.update(split["dsmp"])
         return common
 
-    if op == "madd":
-        common.update(
-            split["madd"]
-            | {
-                "feature_size": layer_plan["output_hw"][1],
-                "channels": split["channels"],
-                "start_position": get_start_position(intr_moves, "MADD_MOVE_BY_LAYER", layer, "madd"),
-            }
-        )
-        return common
-
     if op == "relu":
         common.update(
             split["relu"]
             | {
                 "feature_size": layer_plan["output_hw"][1],
-                "channels": split["channels"],
+                "channels": split["valid_channels"],
             }
         )
         return common
@@ -160,7 +149,7 @@ def build_asm(memory_plan: Dict[str, Any], intr_moves: Dict[str, Dict[int, int]]
             ops = ["conv"]
             if layer_plan.get("has_dsmp"):
                 ops.append("dsmp")
-            ops.extend(["madd", "relu"])
+            ops.append("relu")
             for op in ops:
                 op_plan = build_op_plan(layer_plan, split, op, intr_moves)
                 asm.extend(operators[op].compile_op(op_plan, memory_plan))

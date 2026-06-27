@@ -9,7 +9,6 @@
 ```text
 operator/conv/conv.py
 operator/dsmp/dsmp.py
-operator/madd/madd.py
 operator/relu/relu.py
 ```
 
@@ -64,23 +63,16 @@ start_position 是否能放入字段
 
 输入通道大于 4、输出通道拆分、地址空间分配等全局问题已经移交给 `generate_memory_plan.py`。
 
-## 5. MADD 操作数约定
+## 5. bias 处理约定
 
-当前 MADD 汇编格式为：
-
-```asm
-MADD R1, R2, R3
-```
-
-含义是：
+卷积层的 bias 不再通过 MADD 指令单独相加。`operator/conv/conv.py` 会根据 op plan 中的 `has_bias` 写入 RCONV 的 `condition_bias` bit：
 
 ```text
-R1 = 输入数据地址
-R2 = 输出数据地址
-R3 = 第二输入/bias 数据地址
+0 = 无 bias
+1 = 有 bias
 ```
 
-因此 `operator/madd/madd.py` 会把主输入地址写入 R1，输出地址写入 R2，bias 地址写入 R3。
+当该 bit 为 1 时，NPU 自动从卷积核数据后面读取按 int32 排列的 bias 数据并完成相加。
 
 ## 6. DSMP
 
@@ -100,4 +92,3 @@ DSMP_P = 图像尺寸 + 通道数
 ```
 
 DSMP 当前同样按每次最多 8 通道处理。
-

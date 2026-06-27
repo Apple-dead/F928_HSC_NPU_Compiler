@@ -64,23 +64,23 @@ opcode + rs0 + rs1 + rs2 + dtype + reserve
 
 当前 dtype 固定为 INT8。
 
-## 5. MADD 操作数语义
+## 5. CONV bias 语义
 
-汇编仍写作：
+CONV 计算指令的操作数仍写作：
 
 ```asm
-MADD R1, R2, R3
+CONV R1, R2, R3
 ```
 
-当前语义为：
+语义为：
 
 ```text
 R1 = 输入数据地址
 R2 = 输出数据地址
-R3 = 第二输入/bias 数据地址
+R3 = 卷积核地址
 ```
 
-`assembler.py` 不关心寄存器的业务语义，只按操作数顺序编码 `rs0/rs1/rs2`。因此 MADD 语义变化主要体现在 `operator/madd/madd.py` 的寄存器分配中。
+是否自动执行 bias 相加由 `CFG_REGISTER CONV_P_1/CONV_P_2` 写入的 RCONV `condition_bias` bit 决定。`assembler.py` 只负责按特殊寄存器编号编码 CFG 指令，不解析 RCONV 位域。
 
 ## 6. DSMP 操作数语义
 
@@ -98,4 +98,3 @@ R2 = 输出数据地址
 ```
 
 第三个寄存器字段在编码时置 0。
-

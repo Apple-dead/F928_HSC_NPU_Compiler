@@ -46,15 +46,11 @@ data/intr_move.json
 python ./python/generate_instr.py --intr-move ./data/intr_move.json
 ```
 
-`intr_move.json` 用于配置每层 conv / madd 的 move 值：
+`intr_move.json` 用于配置每层 conv 的 move 值：
 
 ```json
 {
   "CONV_MOVE_BY_LAYER": {
-    "1": 512,
-    "2": 512
-  },
-  "MADD_MOVE_BY_LAYER": {
     "1": 512,
     "2": 512
   }
@@ -74,7 +70,7 @@ move = 512 = 2^9
 start_position = 9
 ```
 
-该值会传给 `operator/conv/conv.py` 或 `operator/madd/madd.py`，由 operator 编码进 `RCONV` 或 `RMADD` 配置寄存器。`move=0` 时起始比特位直接取 0；非 0 的 move 必须是正的 2 的幂，否则脚本会报错。
+该值会传给 `operator/conv/conv.py`，由 operator 编码进 `RCONV` 配置寄存器。`move=0` 时起始比特位直接取 0；非 0 的 move 必须是正的 2 的幂，否则脚本会报错。
 
 ## 3. 执行流程
 
@@ -97,13 +93,13 @@ group1
 对于普通层，每个 group 生成：
 
 ```text
-conv -> madd -> relu
+conv -> relu
 ```
 
 对于 `stride=2,padding=0` 的层，每个 group 生成：
 
 ```text
-conv -> dsmp -> madd -> relu
+conv -> dsmp -> relu
 ```
 
 其中 DSMP 的输入地址、输出地址、图像尺寸和通道数都来自 `memory_plan.json`。
@@ -115,7 +111,6 @@ conv -> dsmp -> madd -> relu
 ```text
 operator/conv/conv.py
 operator/dsmp/dsmp.py
-operator/madd/madd.py
 operator/relu/relu.py
 ```
 
