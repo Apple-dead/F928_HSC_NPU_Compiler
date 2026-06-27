@@ -58,9 +58,7 @@ execution_plan:
   conv/dsmp/relu address
 ```
 
-因此，`weight_to_bram_coe.py` 主要从 `memory_plan.json` 的 `layerN_weight.shape_oihw` 获取 `out_ch / in_ch / kernel_h / kernel_w`，再结合 `data/model_params/layerN_0_weight.txt` 中的权重数值生成 COE。
-
-`bias_to_bram_coe.py` 主要从 `memory_plan.json` 的 `layerN_bias.channels / aligned_channels` 获取通道数，再结合 `data/model_params/layerN_0_bias.txt` 生成 COE。bias 不再读取 `data/bias_move.json`，不截位，也不展开成矩阵。
+因此，`params_to_bram_coe.py` 主要从 `memory_plan.json` 的 `layerN_params`、`layerN_weight` 和 `layerN_bias` 信息获取参数区地址、weight 形状和 bias 通道数，再结合 `data/model_params/layerN_0_weight.txt`、`data/model_params/layerN_0_bias.txt` 生成 `coe/layerN_params.coe`。bias 不再读取 `data/bias_move.json`，不截位，也不展开成矩阵。
 
 ## 1.2 stride=2 卷积与下采样
 
@@ -195,7 +193,7 @@ image_size_bytes = 256 * 256 * 4 = 262144 = 0x00040000
 
 生成 weight COE 时只将输入通道补齐到 4 的倍数，输出通道维度保持模型中的有效输出通道数，不再为补齐出来的虚拟输出通道额外写入整组全 0 卷积核。
 
-当前卷积输入通道数最大支持 256。当前 `generate_memory_plan.py` 和 `weight_to_bram_coe.py` 都会在 `in_channels > 256` 时直接报错，不会生成可用的 memory plan 或 weight COE。
+当前卷积输入通道数最大支持 256。当前 `generate_memory_plan.py` 和 `params_to_bram_coe.py` 都会在 `in_channels > 256` 时直接报错，不会生成可用的 memory plan 或参数 COE。
 
 对于输入通道小于 4 的情况，每个有效输出卷积核补足到 4 个输入卷积核。例如 `3 -> 12` 的第二层卷积，每个输出通道有 3 个有效输入卷积核，需要补 1 个全 0 输入卷积核。
 

@@ -149,7 +149,7 @@ storage_shape
 size_bytes
 ```
 
-bias 不再展开为矩阵。`bias_to_bram_coe.py` 只读取通道数，把 bias 补 0 到 4 的倍数后按 signed int32 word 原样写出。
+bias 不再展开为矩阵。当前由 `params_to_bram_coe.py` 读取通道数，把 bias 补 0 到 4 的倍数后按 signed int32 word 写入对应的 `coe/layerN_params.coe`。
 
 ### layerN_conv_out / layerN_dsmp_out / layerN_relu_out
 
