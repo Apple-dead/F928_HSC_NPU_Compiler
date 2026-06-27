@@ -25,9 +25,6 @@ clean() {
     ./data/memory_plan.json \
     ./data/instr.asm \
     ./data/instr.txt \
-    ./coe/image.coe \
-    ./coe/layer*_weight.coe \
-    ./coe/layer*_bias.coe \
     ./coe/layer*_params.coe \
     ./coe/instr.coe \
     ./target/all.coe \
@@ -53,7 +50,7 @@ python ./python/generate_memory_plan.py "$MODEL_PY_NAME"
 python ./python/generate_instr.py
 
 #image to coe
-python ./python/image_to_bram_coe.py "$IMAGE_PATH" "$IMAGE_COE_PATH"
+#python ./python/image_to_bram_coe.py "$IMAGE_PATH" "$IMAGE_COE_PATH"
 
 #interleaved weight/bias parameter coe
 python ./python/params_to_bram_coe.py --memory-plan ./data/memory_plan.json --model-params ./data/model_params --out-dir ./coe
