@@ -4,7 +4,7 @@
 
 当前 NPU 的卷积单次最大支持 256 个输入通道、8 个输出通道。卷积之外的 DSMP、ReLU、MADD 等算子当前单次最大处理通道数仍为 8。
 
-若某一层输出通道数超过 8，需要拆成多个通道段记录地址偏移，例如：
+若某一层输出通道数超过单次 group 能力，需要拆成多个通道段记录地址偏移。默认按先 8 后 4 拆分；当该层输入或输出 feature map 存储元素数（宽 * 高 * 按 4 对齐后的通道数）大于等于 `CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD` 时，只按 4 通道 group 拆分。例如默认 `3 -> 12` 可拆为：
 
 ```text
 3 -> 12 conv:
@@ -228,7 +228,7 @@ for kh:
       emit weight[oc][ic][kh][kw]
 ```
 
-当输出通道大于 8 时，按先 8 后 4 的方式记录通道段起始偏移。对于 `3 -> 12`：
+当输出通道大于 8 时，默认按先 8 后 4 的方式记录通道段起始偏移；若该层输入或输出 feature map 存储元素数大于等于 `python/npu_config.py` 中的 `CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD`，则只按 4 通道 group 拆分。对于未触发阈值的 `3 -> 12`：
 
 ```text
 group0: output channel 0..7,  offset = 0
@@ -318,17 +318,25 @@ RRELU.feature_size = feature_size
 
 ## 5.1 参数区分组布局（当前实现）
 
-每层初始化参数区为 `layerN_params`，其起始地址等于旧 `layerN_weight` 的起始地址，大小仍等于原 weight 区与 bias 区大小之和。输出通道按最多 8 个有效通道分组，每组物理排列为：
+每层初始化参数区为 `layerN_params`，其起始地址等于旧 `layerN_weight` 的起始地址，大小仍等于原 weight 区与 bias 区大小之和。输出通道默认按最多 8 个有效通道分组；大 feature map 层由 `CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD` 触发后按 4 个有效通道分组。每组物理排列为：
 
 ```text
 该组有效输出通道的 weight -> 该组 bias（补 0 到 4 的倍数）
 ```
 
-例如 `3 -> 12`（输入通道补齐到 4、卷积核为 2x2）为：
+例如普通 `3 -> 12`（输入通道补齐到 4、卷积核为 2x2）默认为：
 
 ```text
 group0: W0..W7 -> B0..B7
 group1: W8..W11 -> B8..B11
+```
+
+若该层触发 4 通道拆分，例如当前 layer2，则为：
+
+```text
+group0: W0..W3 -> B0..B3
+group1: W4..W7 -> B4..B7
+group2: W8..W11 -> B8..B11
 ```
 
 `3 -> 9` 为：

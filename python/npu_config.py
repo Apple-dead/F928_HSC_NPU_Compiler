@@ -17,3 +17,8 @@ INFER_PARSE_MODE = 2
 INFER_PARSE_LAYER_LIMIT = 3
 
 INSTR_WORD_BYTES = 4
+
+# If either a layer input feature map or output feature map has at least this
+# many stored elements (width * height * aligned_channels), split output
+# channels only in 4-channel groups instead of the default 8-then-4 grouping.
+CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD = 256 * 256 * 4
