@@ -219,14 +219,34 @@ padded_weight[3][4][3][3]
 
 补齐后的输出通道只用于输出 feature map、bias 和运行时区域占位，不参与有效计算，也不对应 weight COE 中的整组全 0 卷积核。
 
-每个输出卷积核内部按如下顺序写入：
+每个有效输出通道对应一组输入卷积核。该组内部先按输入通道每 4 个卷积核分块，再在每个 4 通道块内按卷积核元素位置交错写入：
 
 ```text
-for kh:
-  for kw:
-    for ic in padded_input_channels:
-      emit weight[oc][ic][kh][kw]
+for ic_base in range(0, padded_input_channels, 4):
+  for kh:
+    for kw:
+      for ic in ic_base .. ic_base+3:
+        emit weight[oc][ic][kh][kw]
 ```
+
+因此对于 `layer3` 这类 `12 -> 12, kernel=3x3` 的卷积，某个输出通道 `W0` 内部不是一次性排列全部 12 个输入卷积核的同一位置，而是分成 3 个输入通道块：
+
+```text
+ic0..ic3:
+  ic0(0,0), ic1(0,0), ic2(0,0), ic3(0,0),
+  ic0(0,1), ic1(0,1), ic2(0,1), ic3(0,1),
+  ...
+
+ic4..ic7:
+  ic4(0,0), ic5(0,0), ic6(0,0), ic7(0,0),
+  ic4(0,1), ...
+
+ic8..ic11:
+  ic8(0,0), ic9(0,0), ic10(0,0), ic11(0,0),
+  ic8(0,1), ...
+```
+
+当输入通道数小于等于 4 时，该规则与单个 4 通道块的旧直观顺序一致；例如当前 layer1、layer2 的参数 COE 不会因为该规则变化而改变。
 
 当输出通道大于 8 时，默认按先 8 后 4 的方式记录通道段起始偏移；若该层输入或输出 feature map 存储元素数大于等于 `python/npu_config.py` 中的 `CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD`，则只按 4 通道 group 拆分。对于未触发阈值的 `3 -> 12`：
 
