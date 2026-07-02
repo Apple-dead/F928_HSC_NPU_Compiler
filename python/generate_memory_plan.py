@@ -71,17 +71,49 @@ def validate_no_overlap(a_start: int, a_size: int, b_start: int, b_size: int, a_
         )
 
 
-def instr_count_for_layers(layers: List[Dict[str, Any]]) -> int:
+def feature_map_elements(height: int, width: int, channels: int) -> int:
+    return height * width * channels
+
+
+def channel_group_max_channels(
+    *,
+    input_h: int,
+    input_w: int,
+    aligned_in_ch: int,
+    output_h: int,
+    output_w: int,
+    aligned_out_ch: int,
+) -> int:
+    input_size = feature_map_elements(input_h, input_w, aligned_in_ch)
+    output_size = feature_map_elements(output_h, output_w, aligned_out_ch)
+    threshold = cfg.CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD
+    return 4 if input_size >= threshold or output_size >= threshold else 8
+
+
+def instr_count_for_layers(layers: List[Dict[str, Any]], input_h: int, input_w: int) -> int:
     # Per split: conv: 9, optional dsmp: 6, relu: 7. Plus END: 1.
     total = 1
+    height = input_h
+    width = input_w
     for layer in layers:
         conv = layer["conv"]
+        aligned_in_ch = aligned_channels(conv["in_channels"])
         aligned_out_ch = aligned_channels(conv["out_channels"])
-        split_count = len(npu_channel_groups(conv["out_channels"], aligned_out_ch))
+        out_h, out_w = model_parser.conv_output_hw(height, width, conv)
+        max_channels = channel_group_max_channels(
+            input_h=height,
+            input_w=width,
+            aligned_in_ch=aligned_in_ch,
+            output_h=out_h,
+            output_w=out_w,
+            aligned_out_ch=aligned_out_ch,
+        )
+        split_count = len(npu_channel_groups(conv["out_channels"], aligned_out_ch, max_channels=max_channels))
         per_split = 9 + 7
         if layer_needs_dsmp(conv):
             per_split += 6
         total += split_count * per_split
+        height, width = out_h, out_w
     return total
 
 
@@ -135,6 +167,8 @@ def build_layer_execution_plan(
     aligned_out_ch: int,
     kh: int,
     kw: int,
+    input_h: int,
+    input_w: int,
     out_h: int,
     out_w: int,
     input_tensor: Dict[str, Any],
@@ -152,12 +186,22 @@ def build_layer_execution_plan(
     bytes_per_conv_feature_channel = conv_out_h * conv_out_w
     bytes_per_feature_channel = out_h * out_w
     has_dsmp = dsmp_out_tensor is not None
+    input_feature_elements = feature_map_elements(input_h, input_w, aligned_in_ch)
+    output_feature_elements = feature_map_elements(out_h, out_w, aligned_out_ch)
+    max_group_channels = channel_group_max_channels(
+        input_h=input_h,
+        input_w=input_w,
+        aligned_in_ch=aligned_in_ch,
+        output_h=out_h,
+        output_w=out_w,
+        aligned_out_ch=aligned_out_ch,
+    )
     splits: List[Dict[str, Any]] = []
 
     # Physical parameter layout is, per group: valid weights then padded bias.
     # A later group must therefore skip the preceding group's bias words.
     parameter_offset = 0
-    for group in npu_channel_groups(out_ch, aligned_out_ch):
+    for group in npu_channel_groups(out_ch, aligned_out_ch, max_channels=max_group_channels):
         start_channel = group["start_channel"]
         conv_feature_offset = start_channel * bytes_per_conv_feature_channel
         feature_offset = start_channel * bytes_per_feature_channel
@@ -216,6 +260,10 @@ def build_layer_execution_plan(
     return {
         "layer": layer_name,
         "npu_max_channels_per_pass": 8,
+        "channel_group_max_channels": max_group_channels,
+        "channel_group4_feature_size_threshold": cfg.CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD,
+        "input_feature_elements": input_feature_elements,
+        "output_feature_elements": output_feature_elements,
         "channel_alignment": 4,
         "input_channels": in_ch,
         "output_channels": out_ch,
@@ -262,7 +310,7 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
 
     image_aligned_ch = aligned_channels(layers[0]["conv"]["in_channels"])
     image_size = cfg.IMAGE_HEIGHT * cfg.IMAGE_WIDTH * image_aligned_ch
-    instr_size = instr_count_for_layers(layers) * cfg.INSTR_WORD_BYTES
+    instr_size = instr_count_for_layers(layers, cfg.IMAGE_HEIGHT, cfg.IMAGE_WIDTH) * cfg.INSTR_WORD_BYTES
 
     plan: Dict[str, Any] = {
         "config": {
@@ -273,6 +321,7 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
             "IMAGE_SOURCE": cfg.IMAGE_SOURCE,
             "INFER_PARSE_MODE": cfg.INFER_PARSE_MODE,
             "INFER_PARSE_LAYER_LIMIT": cfg.INFER_PARSE_LAYER_LIMIT,
+            "CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD": cfg.CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD,
             "model_py": str(model_py),
         },
         "relu": relu_cfg,
@@ -390,6 +439,8 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
                 aligned_out_ch=aligned_out_ch,
                 kh=kh,
                 kw=kw,
+                input_h=height,
+                input_w=width,
                 out_h=out_h,
                 out_w=out_w,
                 input_tensor=plan["tensors"][input_tensor],

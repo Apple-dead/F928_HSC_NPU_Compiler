@@ -12,14 +12,14 @@
 - 每层 conv / 可选 dsmp / relu 运行时输出缓冲区的地址和大小；
 - 每层在当前 NPU 通道能力下的拆分执行计划。
 
-当前 NPU 卷积和矩阵计算单次最大处理通道数为 8，数据仍按 4 通道对齐。若某层输出通道数大于 8，`memory_plan.json` 会将该层拆成多个通道段，例如 12 输出通道拆成 8 + 4。
+当前 NPU 卷积和矩阵计算单次最大处理通道数为 8，数据仍按 4 通道对齐。默认情况下，若某层输出通道数大于 8，`memory_plan.json` 会将该层按先 8 后 4 的方式拆成多个通道段，例如 12 输出通道拆成 8 + 4。若该层输入或输出 feature map 的存储元素数（宽 * 高 * 按 4 对齐后的通道数）大于等于 `CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD`，则该层输出通道只按 4 通道 group 拆分，例如 12 输出通道拆成 4 + 4 + 4。
 
 当前卷积输入通道数最大支持 256，生成 memory plan 时若超过 256 会直接报错。
 
 当前 `generate_memory_plan.py` 的通道支持范围可以概括为：
 
 - 输入通道数 `<= 256`、输出通道数 `<= 8`：直接生成单个输出通道 split。
-- 输入通道数 `<= 256`、输出通道数 `> 8`：支持生成，按 NPU 单次最多 8 输出通道拆分，例如 12 输出通道拆成 8 + 4。
+- 输入通道数 `<= 256`、输出通道数 `> 8`：支持生成。默认按 NPU 单次最多 8 输出通道拆分，例如 12 输出通道拆成 8 + 4；当该层输入或输出 feature map 存储元素数大于等于 `CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD` 时，只按 4 输出通道拆分，例如 12 输出通道拆成 4 + 4 + 4。
 - 输入通道数 `> 256`：不支持，直接报错，不生成近似或不完整的 memory plan。
 
 当前 stride / padding 支持范围为：
@@ -43,6 +43,7 @@ python ./python/generate_memory_plan.py yolov2_14layer_quantized.py
 IMAGE_HEIGHT / IMAGE_WIDTH
 INFER_PARSE_MODE
 INFER_PARSE_LAYER_LIMIT
+CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD
 INIT_BASE_ADDR / INIT_LIMIT_ADDR
 RUNTIME_BASE_ADDR
 ```
@@ -244,19 +245,23 @@ layout
 
 规划方式是先为该层完整的卷积输出、可选下采样输出和 ReLU 输出分别预留总空间，然后每个 split 按通道段连续写入对应区域。
 
-例如第二层输出通道为 12，输入 feature map 为 `256 x 256`，DSMP 后输出 feature map 为 `128 x 128`，按 8 + 4 拆成两个 group：
+例如第二层输出通道为 12，输入 feature map 存储大小为 `256 * 256 * 4`，达到默认阈值 `CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD = 256 * 256 * 4`，因此按 4 + 4 + 4 拆成三个 group：
 
 ```text
 layer2_conv_out 总空间:
-  base = 0x002C0000
+  base = 0x00280000
   size = 12 * 256 * 256 = 0x000C0000 bytes
 
 group0 conv output:
-  start = 0x002C0000
-  size  = 8 * 256 * 256 = 0x00080000 bytes
+  start = 0x00280000
+  size  = 4 * 256 * 256 = 0x00040000 bytes
 
 group1 conv output:
-  start = 0x00340000
+  start = 0x002C0000
+  size  = 4 * 256 * 256 = 0x00040000 bytes
+
+group2 conv output:
+  start = 0x00300000
   size  = 4 * 256 * 256 = 0x00040000 bytes
 ```
 
@@ -266,11 +271,12 @@ group1 conv output:
 
 `splits` 描述该层被拆成几个 NPU pass。
 
-对于输出通道数小于等于 8 的层，通常只有一个 split。对于 `3 -> 12` 的第二层，会拆成两个 split：
+对于输出通道数小于等于 8 的层，通常只有一个 split。对于 `3 -> 12` 的第二层，由于输入 feature map 存储元素数达到阈值，会拆成三个 split：
 
 ```text
-group0: output channel 0..7
-group1: output channel 8..11
+group0: output channel 0..3
+group1: output channel 4..7
+group2: output channel 8..11
 ```
 
 每个 split 包含：
@@ -414,6 +420,6 @@ runtime_end_addr_exclusive
 
 `init_regions` 对每层使用单一的 `layerN_params` 项，替代原先分离的 `layerN_weight` 和 `layerN_bias` 项。其地址为原 weight 起始地址，大小为原 weight+bias 之和。
 
-`execution_plan.splits` 中的 `offsets_bytes.weight` 和 `conv.weight_addr` 使用参数区物理偏移：每个最多 8 通道 group 先存有效 weight，再存补齐到 4 通道边界的 int32 bias。因此后续 group 的 weight 偏移会跨过前一 group 的 bias；`bias_addr` 记录该 group 自动 bias 读取的起始位置。
+`execution_plan.splits` 中的 `offsets_bytes.weight` 和 `conv.weight_addr` 使用参数区物理偏移：每个输出通道 group（默认最多 8 通道，大 feature map 层为 4 通道）先存有效 weight，再存补齐到 4 通道边界的 int32 bias。因此后续 group 的 weight 偏移会跨过前一 group 的 bias；`bias_addr` 记录该 group 自动 bias 读取的起始位置。
 
 运行时 `conv_out`、`dsmp_out`、`relu_out` 仍按 output channel 的 feature-map 大小计算偏移，group 的矩阵在预留区中按通道顺序连续存放。
