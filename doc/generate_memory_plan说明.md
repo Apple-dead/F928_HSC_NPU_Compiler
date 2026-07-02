@@ -42,7 +42,7 @@ python ./python/generate_memory_plan.py yolov2_14layer_quantized.py
 ```text
 IMAGE_HEIGHT / IMAGE_WIDTH
 INFER_PARSE_MODE
-INFER_PARSE_LAYER_LIMIT
+INFER_PARSE_LAYER_START / INFER_PARSE_LAYER_END
 CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD
 INIT_BASE_ADDR / INIT_LIMIT_ADDR
 RUNTIME_BASE_ADDR
@@ -61,7 +61,7 @@ RUNTIME_BASE_ADDR
 IMAGE_BASE_ADDR
 IMAGE_SOURCE
 INFER_PARSE_MODE
-INFER_PARSE_LAYER_LIMIT
+INFER_PARSE_LAYER_START / INFER_PARSE_LAYER_END
 model_py
 ```
 
@@ -73,7 +73,7 @@ model_py
 
 ### image
 
-描述输入图像在内存中的信息：
+描述当前推理起始层输入 feature map 在内存中的信息。`INFER_PARSE_LAYER_START = 1` 时它是原始输入图像；从中间层开始时，它是该起始层的输入 feature map：
 
 ```text
 addr
@@ -85,7 +85,7 @@ size_bytes
 file
 ```
 
-其中 `storage_shape_nchw` 是按 4 通道对齐后的实际存储形状。
+其中 `storage_shape_nchw` 是按 4 通道对齐后的实际存储形状。`IMAGE_SOURCE = "coe"` 时，`generate_memory_plan.py` 会检查 `coe/image.coe` 的 32-bit word 数是否等于 `size_bytes / 4`；`IMAGE_SOURCE = "external"` 时，输入不进入 `init_regions`，地址来自 `IMAGE_BASE_ADDR`。
 
 ### model_layers
 

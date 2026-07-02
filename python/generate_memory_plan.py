@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
+import merge as coe_merge
 import model_parser
 import npu_config as cfg
 
@@ -300,17 +301,71 @@ def build_layer_execution_plan(
     }
 
 
+
+def selected_input_shape(
+    all_layers: List[Dict[str, Any]],
+    selected_layers: List[Dict[str, Any]],
+    image_h: int,
+    image_w: int,
+) -> tuple[int, int, int]:
+    if not selected_layers:
+        raise ValueError("no selected layers")
+
+    start_layer = selected_layers[0]["layer_index"]
+    height = image_h
+    width = image_w
+    channels = all_layers[0]["conv"]["in_channels"]
+
+    for layer in all_layers:
+        idx = layer["layer_index"]
+        conv = layer["conv"]
+        if idx == start_layer:
+            if conv["in_channels"] != channels:
+                raise ValueError(
+                    f"layer{idx} expects {conv['in_channels']} input channels, "
+                    f"but previous model output has {channels} channels"
+                )
+            return height, width, conv["in_channels"]
+
+        if conv["in_channels"] != channels:
+            raise ValueError(
+                f"layer{idx} expects {conv['in_channels']} input channels, "
+                f"but previous model output has {channels} channels"
+            )
+        height, width = model_parser.conv_output_hw(height, width, conv)
+        channels = conv["out_channels"]
+
+    raise ValueError(f"could not derive input shape for layer{start_layer}")
+
+
+def validate_input_coe_size(file_text: str, expected_size: int, input_shape: List[int]) -> None:
+    path = PROJECT_ROOT / file_text
+    if not path.is_file():
+        raise FileNotFoundError(f"input COE not found: {path}")
+    values, _ = coe_merge.read_coe_values(path)
+    actual_size = len(values) * 4
+    if actual_size != expected_size:
+        raise ValueError(
+            f"{path}: input COE size mismatch for start-layer input; "
+            f"file has {actual_size} bytes ({len(values)} 32-bit words), "
+            f"expected {expected_size} bytes for storage_shape_nchw={input_shape}"
+        )
 def build_plan(model_py: Path) -> Dict[str, Any]:
-    layers, relu_cfg = model_parser.parse_model_layers(model_py)
+    all_layers, relu_cfg = model_parser.parse_all_model_layers(model_py)
+    layers = model_parser.select_layers(all_layers)
 
     if cfg.IMAGE_SOURCE not in ("coe", "external"):
         raise ValueError('IMAGE_SOURCE must be "coe" or "external"')
     if cfg.IMAGE_HEIGHT % 8 != 0 or cfg.IMAGE_WIDTH % 8 != 0:
         raise ValueError("image height/width must be divisible by 8")
 
-    image_aligned_ch = aligned_channels(layers[0]["conv"]["in_channels"])
-    image_size = cfg.IMAGE_HEIGHT * cfg.IMAGE_WIDTH * image_aligned_ch
-    instr_size = instr_count_for_layers(layers, cfg.IMAGE_HEIGHT, cfg.IMAGE_WIDTH) * cfg.INSTR_WORD_BYTES
+    input_h, input_w, input_ch = selected_input_shape(all_layers, layers, cfg.IMAGE_HEIGHT, cfg.IMAGE_WIDTH)
+    image_aligned_ch = aligned_channels(input_ch)
+    image_size = input_h * input_w * image_aligned_ch
+    image_file = "coe/image.coe" if cfg.IMAGE_SOURCE == "coe" else None
+    image_addr = cfg.INIT_BASE_ADDR if cfg.IMAGE_SOURCE == "coe" else cfg.IMAGE_BASE_ADDR
+    instr_size = instr_count_for_layers(layers, input_h, input_w) * cfg.INSTR_WORD_BYTES
+    input_storage_shape = [1, image_aligned_ch, input_h, input_w]
 
     plan: Dict[str, Any] = {
         "config": {
@@ -319,8 +374,11 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
             "RUNTIME_BASE_ADDR": hex_addr(cfg.RUNTIME_BASE_ADDR),
             "IMAGE_BASE_ADDR": hex_addr(cfg.IMAGE_BASE_ADDR),
             "IMAGE_SOURCE": cfg.IMAGE_SOURCE,
+            "IMAGE_HEIGHT": cfg.IMAGE_HEIGHT,
+            "IMAGE_WIDTH": cfg.IMAGE_WIDTH,
             "INFER_PARSE_MODE": cfg.INFER_PARSE_MODE,
-            "INFER_PARSE_LAYER_LIMIT": cfg.INFER_PARSE_LAYER_LIMIT,
+            "INFER_PARSE_LAYER_START": cfg.INFER_PARSE_LAYER_START,
+            "INFER_PARSE_LAYER_END": cfg.INFER_PARSE_LAYER_END,
             "CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD": cfg.CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD,
             "model_py": str(model_py),
         },
@@ -328,15 +386,17 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
         "alignment_bytes": 4,
         "image": {
             "source": cfg.IMAGE_SOURCE,
-            "addr": hex_addr(cfg.IMAGE_BASE_ADDR),
-            "channels": layers[0]["conv"]["in_channels"],
+            "addr": hex_addr(image_addr),
+            "input_layer": layers[0]["layer"],
+            "channels": input_ch,
             "aligned_channels": image_aligned_ch,
-            "shape_nchw": [1, layers[0]["conv"]["in_channels"], cfg.IMAGE_HEIGHT, cfg.IMAGE_WIDTH],
-            "storage_shape_nchw": [1, image_aligned_ch, cfg.IMAGE_HEIGHT, cfg.IMAGE_WIDTH],
+            "shape_nchw": [1, input_ch, input_h, input_w],
+            "storage_shape_nchw": input_storage_shape,
             "size_bytes": image_size,
-            "file": "coe/image.coe" if cfg.IMAGE_SOURCE == "coe" else None,
+            "file": image_file,
         },
         "model_layers": layers,
+        "all_model_layers": all_layers,
         "tensors": {},
         "execution_plan": [],
         "init_regions": [],
@@ -348,14 +408,12 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
     if cfg.IMAGE_SOURCE == "coe":
         if cfg.IMAGE_BASE_ADDR != cfg.INIT_BASE_ADDR:
             raise ValueError("IMAGE_SOURCE=coe currently requires IMAGE_BASE_ADDR == INIT_BASE_ADDR")
-        add_init_region(plan, "image", image_size, "coe/image.coe")
-    else:
-        validate_no_overlap(cfg.IMAGE_BASE_ADDR, image_size, cfg.INIT_BASE_ADDR, instr_size, "external image", "init data")
-
+        validate_input_coe_size(image_file, image_size, input_storage_shape)
+        add_init_region(plan, "image", image_size, image_file)
     plan["tensors"]["image"] = plan["image"]
 
-    height = cfg.IMAGE_HEIGHT
-    width = cfg.IMAGE_WIDTH
+    height = input_h
+    width = input_w
     input_tensor = "image"
     for layer in layers:
         idx = layer["layer_index"]
@@ -468,6 +526,24 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
         raise ValueError(
             f"RUNTIME_BASE_ADDR {hex_addr(cfg.RUNTIME_BASE_ADDR)} overlaps init address window "
             f"ending at {hex_addr(cfg.INIT_LIMIT_ADDR)}"
+        )
+
+    if cfg.IMAGE_SOURCE == "external":
+        validate_no_overlap(
+            cfg.IMAGE_BASE_ADDR,
+            image_size,
+            cfg.INIT_BASE_ADDR,
+            init_end - cfg.INIT_BASE_ADDR,
+            "external input",
+            "init data",
+        )
+        validate_no_overlap(
+            cfg.IMAGE_BASE_ADDR,
+            image_size,
+            cfg.RUNTIME_BASE_ADDR,
+            plan["_next_runtime_addr"] - cfg.RUNTIME_BASE_ADDR,
+            "external input",
+            "runtime data",
         )
 
     plan["init_end_addr_exclusive"] = hex_addr(init_end)

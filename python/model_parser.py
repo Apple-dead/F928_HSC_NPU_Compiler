@@ -154,7 +154,7 @@ def find_layer_relu(tree: ast.AST, model_py: Path) -> Dict[str, Any]:
     raise ValueError(f"could not find LeakyReLU in self.layer in {model_py}")
 
 
-def parse_model_layers(model_py: Path) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+def parse_all_model_layers(model_py: Path) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
     tree = ast.parse(model_py.read_text(encoding="utf-8"))
     layers: List[Dict[str, Any]] = []
 
@@ -191,7 +191,12 @@ def parse_model_layers(model_py: Path) -> tuple[List[Dict[str, Any]], Dict[str, 
     if not layers:
         raise ValueError(f"could not find any self.layerN Conv2d definitions in {model_py}")
     layers.sort(key=lambda item: item["layer_index"])
-    return select_layers(layers), find_layer_relu(tree, model_py)
+    return layers, find_layer_relu(tree, model_py)
+
+
+def parse_model_layers(model_py: Path) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    layers, relu = parse_all_model_layers(model_py)
+    return select_layers(layers), relu
 
 
 def select_layers(layers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -199,15 +204,19 @@ def select_layers(layers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if mode == 1:
         return layers
     if mode == 2:
-        limit = int(cfg.INFER_PARSE_LAYER_LIMIT)
-        if limit <= 0:
-            raise ValueError("INFER_PARSE_LAYER_LIMIT must be positive when INFER_PARSE_MODE=2")
-        selected = [layer for layer in layers if layer["layer_index"] <= limit]
-        if len(selected) != limit:
+        start = int(cfg.INFER_PARSE_LAYER_START)
+        end = int(cfg.INFER_PARSE_LAYER_END)
+        if start <= 0 or end <= 0:
+            raise ValueError("INFER_PARSE_LAYER_START/END must be positive when INFER_PARSE_MODE=2")
+        if start > end:
+            raise ValueError("INFER_PARSE_LAYER_START must be <= INFER_PARSE_LAYER_END")
+        selected = [layer for layer in layers if start <= layer["layer_index"] <= end]
+        expected_count = end - start + 1
+        if len(selected) != expected_count:
             found = [layer["layer_index"] for layer in layers]
-            raise ValueError(f"requested layers 1..{limit}, but model contains layers {found}")
+            raise ValueError(f"requested layers {start}..{end}, but model contains layers {found}")
         return selected
-    raise ValueError("INFER_PARSE_MODE must be 1 (full model) or 2 (up to layer limit)")
+    raise ValueError("INFER_PARSE_MODE must be 1 (full model) or 2 (layer range)")
 
 
 def conv_output_hw(height: int, width: int, conv: Dict[str, Any]) -> tuple[int, int]:
