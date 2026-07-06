@@ -15,6 +15,7 @@ import npu_config as cfg
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUT_PATH = PROJECT_ROOT / "data" / "memory_plan.json"
+MIN_RUNTIME_FEATURE_HW = 8
 
 
 def align_up(value: int, alignment: int = 4) -> int:
@@ -76,6 +77,10 @@ def feature_map_elements(height: int, width: int, channels: int) -> int:
     return height * width * channels
 
 
+def runtime_storage_hw(height: int, width: int) -> tuple[int, int]:
+    return max(height, MIN_RUNTIME_FEATURE_HW), max(width, MIN_RUNTIME_FEATURE_HW)
+
+
 def channel_group_max_channels(
     *,
     input_h: int,
@@ -101,12 +106,13 @@ def instr_count_for_layers(layers: List[Dict[str, Any]], input_h: int, input_w: 
         aligned_in_ch = aligned_channels(conv["in_channels"])
         aligned_out_ch = aligned_channels(conv["out_channels"])
         out_h, out_w = model_parser.conv_output_hw(height, width, conv)
+        storage_out_h, storage_out_w = runtime_storage_hw(out_h, out_w)
         max_channels = channel_group_max_channels(
             input_h=height,
             input_w=width,
             aligned_in_ch=aligned_in_ch,
-            output_h=out_h,
-            output_w=out_w,
+            output_h=storage_out_h,
+            output_w=storage_out_w,
             aligned_out_ch=aligned_out_ch,
         )
         split_count = len(npu_channel_groups(conv["out_channels"], aligned_out_ch, max_channels=max_channels))
@@ -114,7 +120,7 @@ def instr_count_for_layers(layers: List[Dict[str, Any]], input_h: int, input_w: 
         if layer_needs_dsmp(conv):
             per_split += 6
         total += split_count * per_split
-        height, width = out_h, out_w
+        height, width = storage_out_h, storage_out_w
     return total
 
 
@@ -179,22 +185,26 @@ def build_layer_execution_plan(
     relu_out_tensor: Dict[str, Any],
     conv_out_h: int,
     conv_out_w: int,
+    conv_storage_h: int,
+    conv_storage_w: int,
+    output_storage_h: int,
+    output_storage_w: int,
 ) -> Dict[str, Any]:
     if in_ch > 256:
         raise NotImplementedError(f"{layer_name}: conv input channels > 256 are not supported by current NPU.")
 
     bytes_per_weight_output_channel = aligned_in_ch * kh * kw
-    bytes_per_conv_feature_channel = conv_out_h * conv_out_w
-    bytes_per_feature_channel = out_h * out_w
+    bytes_per_conv_feature_channel = conv_storage_h * conv_storage_w
+    bytes_per_feature_channel = output_storage_h * output_storage_w
     has_dsmp = dsmp_out_tensor is not None
     input_feature_elements = feature_map_elements(input_h, input_w, aligned_in_ch)
-    output_feature_elements = feature_map_elements(out_h, out_w, aligned_out_ch)
+    output_feature_elements = feature_map_elements(output_storage_h, output_storage_w, aligned_out_ch)
     max_group_channels = channel_group_max_channels(
         input_h=input_h,
         input_w=input_w,
         aligned_in_ch=aligned_in_ch,
-        output_h=out_h,
-        output_w=out_w,
+        output_h=output_storage_h,
+        output_w=output_storage_w,
         aligned_out_ch=aligned_out_ch,
     )
     splits: List[Dict[str, Any]] = []
@@ -238,7 +248,7 @@ def build_layer_execution_plan(
             item["dsmp"] = {
                 "input_addr": hex_addr(addr_to_int(conv_out_tensor["addr"]) + conv_feature_offset),
                 "output_addr": hex_addr(addr_to_int(dsmp_out_tensor["addr"]) + feature_offset),
-                "image_size": conv_out_h,
+                "image_size": conv_storage_h,
                 "channels": group["valid_channels"],
             }
             relu_input_addr = hex_addr(addr_to_int(dsmp_out_tensor["addr"]) + feature_offset)
@@ -271,9 +281,13 @@ def build_layer_execution_plan(
         "aligned_input_channels": aligned_in_ch,
         "aligned_output_channels": aligned_out_ch,
         "kernel_size": [kh, kw],
-        "conv_output_hw": [conv_out_h, conv_out_w],
+        "input_hw": [input_h, input_w],
+        "logical_conv_output_hw": [conv_out_h, conv_out_w],
+        "conv_output_hw": [conv_storage_h, conv_storage_w],
         "has_dsmp": has_dsmp,
-        "output_hw": [out_h, out_w],
+        "logical_output_hw": [out_h, out_w],
+        "output_hw": [output_storage_h, output_storage_w],
+        "minimum_runtime_feature_hw": MIN_RUNTIME_FEATURE_HW,
         "reserved_regions": {
             "conv_out": {
                 "addr": conv_out_tensor["addr"],
@@ -380,6 +394,7 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
             "INFER_PARSE_LAYER_START": cfg.INFER_PARSE_LAYER_START,
             "INFER_PARSE_LAYER_END": cfg.INFER_PARSE_LAYER_END,
             "CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD": cfg.CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD,
+            "MIN_RUNTIME_FEATURE_HW": MIN_RUNTIME_FEATURE_HW,
             "model_py": str(model_py),
         },
         "relu": relu_cfg,
@@ -427,6 +442,8 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
         needs_dsmp = layer_needs_dsmp(conv)
         out_h, out_w = model_parser.conv_output_hw(height, width, conv)
         conv_out_h, conv_out_w = (height, width) if needs_dsmp else (out_h, out_w)
+        conv_storage_h, conv_storage_w = runtime_storage_hw(conv_out_h, conv_out_w)
+        output_storage_h, output_storage_w = runtime_storage_hw(out_h, out_w)
 
         if idx == 1 and input_tensor == "image" and in_ch != plan["image"]["channels"]:
             raise ValueError(f"{layer_name} in_channels does not match image channels")
@@ -434,8 +451,8 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
         weight_size = out_ch * aligned_in_ch * kh * kw
         bias_size = aligned_out_ch * 4
         parameter_size = weight_size + bias_size
-        conv_output_size = conv_out_h * conv_out_w * aligned_out_ch
-        output_size = out_h * out_w * aligned_out_ch
+        conv_output_size = conv_storage_h * conv_storage_w * aligned_out_ch
+        output_size = output_storage_h * output_storage_w * aligned_out_ch
         params = add_init_region(plan, f"{layer_name}_params", parameter_size, f"coe/{layer_name}_params.coe")
 
         weight_tensor = {
@@ -468,13 +485,13 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
 
         runtime_tensors: Dict[str, Dict[str, Any]] = {}
         runtime_specs = [
-            ("conv", conv_output_size, conv_out_h, conv_out_w),
+            ("conv", conv_output_size, conv_out_h, conv_out_w, conv_storage_h, conv_storage_w),
         ]
         if needs_dsmp:
-            runtime_specs.append(("dsmp", output_size, out_h, out_w))
-        runtime_specs.append(("relu", output_size, out_h, out_w))
+            runtime_specs.append(("dsmp", output_size, out_h, out_w, output_storage_h, output_storage_w))
+        runtime_specs.append(("relu", output_size, out_h, out_w, output_storage_h, output_storage_w))
 
-        for op_name, region_size, region_h, region_w in runtime_specs:
+        for op_name, region_size, region_h, region_w, storage_h, storage_w in runtime_specs:
             tensor_name = f"{layer_name}_{op_name}_out"
             runtime = add_runtime_region(
                 plan,
@@ -483,7 +500,8 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
                 channels=out_ch,
                 aligned_channels=aligned_out_ch,
                 shape_nchw=[1, out_ch, region_h, region_w],
-                storage_shape_nchw=[1, aligned_out_ch, region_h, region_w],
+                storage_shape_nchw=[1, aligned_out_ch, storage_h, storage_w],
+                minimum_runtime_feature_hw=MIN_RUNTIME_FEATURE_HW,
             )
             plan["tensors"][tensor_name] = runtime
             runtime_tensors[op_name] = runtime
@@ -508,11 +526,15 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
                 relu_out_tensor=runtime_tensors["relu"],
                 conv_out_h=conv_out_h,
                 conv_out_w=conv_out_w,
+                conv_storage_h=conv_storage_h,
+                conv_storage_w=conv_storage_w,
+                output_storage_h=output_storage_h,
+                output_storage_w=output_storage_w,
             )
         )
 
         input_tensor = f"{layer_name}_relu_out"
-        height, width = out_h, out_w
+        height, width = output_storage_h, output_storage_w
 
     instr = add_init_region(plan, "instr", instr_size, "coe/instr.coe")
     plan["tensors"]["instr"] = instr

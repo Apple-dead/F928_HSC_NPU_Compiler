@@ -14,6 +14,8 @@
 
 当前 NPU 卷积和矩阵计算单次最大处理通道数为 8，数据仍按 4 通道对齐。默认情况下，若某层输出通道数大于 8，`memory_plan.json` 会将该层按先 8 后 4 的方式拆成多个通道段，例如 12 输出通道拆成 8 + 4。若该层输入或输出 feature map 的存储元素数（宽 * 高 * 按 4 对齐后的通道数）大于等于 `CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD`，则该层输出通道只按 4 通道 group 拆分，例如 12 输出通道拆成 4 + 4 + 4。
 
+运行时中间 feature map 还遵守 8x8 最小存储尺寸：若某个算子输出通道中的矩阵实际尺寸小于 8x8，NPU 会在写回时补零到 8x8。编译器侧不负责补数据，但在 `runtime_regions`、`execution_plan.splits` 的地址偏移和后续层输入尺寸规划中，都必须把该输出按 8x8 的物理占用计算。当前实现中该常量为 `MIN_RUNTIME_FEATURE_HW = 8`。
+
 当前卷积输入通道数最大支持 256，生成 memory plan 时若超过 256 会直接报错。
 
 当前 `generate_memory_plan.py` 的通道支持范围可以概括为：
@@ -167,6 +169,8 @@ storage_shape_nchw
 
 这些地址是后续生成 conv、dsmp、relu 指令时需要使用的输入输出地址。
 
+`shape_nchw` 记录模型或算子语义上的逻辑输出尺寸；`storage_shape_nchw` 记录运行时真实预留尺寸。运行时输出的高、宽会分别按至少 8 处理，因此逻辑尺寸小于 8x8 时，`size_bytes` 使用 `aligned_channels * max(height, 8) * max(width, 8)` 计算。后续层把上一次输出当作这个存储尺寸继续规划。
+
 对于 `stride=2,padding=0` 的层，会额外生成：
 
 ```text
@@ -190,10 +194,15 @@ output_channels
 aligned_input_channels
 aligned_output_channels
 kernel_size
+logical_conv_output_hw
+conv_output_hw
+logical_output_hw
 output_hw
 reserved_regions
 splits
 ```
+
+`logical_conv_output_hw` / `logical_output_hw` 是模型语义尺寸；`conv_output_hw` / `output_hw` 是 NPU 可见尺寸，已经应用运行时 8x8 最小存储规则。`generate_instr.py` 直接使用 `conv_output_hw` 和 `output_hw` 生成 CONV、DSMP、ReLU 的尺寸字段。
 
 ### stride=2 的 DSMP 规划
 
@@ -243,7 +252,7 @@ size_bytes
 layout
 ```
 
-规划方式是先为该层完整的卷积输出、可选下采样输出和 ReLU 输出分别预留总空间，然后每个 split 按通道段连续写入对应区域。
+规划方式是先为该层完整的卷积输出、可选下采样输出和 ReLU 输出分别预留总空间，然后每个 split 按通道段连续写入对应区域。预留空间按运行时存储尺寸计算；当逻辑矩阵小于 8x8 时，这里的 `size_bytes` 会按 8x8 预留。
 
 例如第二层输出通道为 12，输入 feature map 存储大小为 `256 * 256 * 4`，达到默认阈值 `CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD = 256 * 256 * 4`，因此按 4 + 4 + 4 拆成三个 group：
 
@@ -319,8 +328,8 @@ group1.bias   = 0x00000020
 对于 stride=2 的层：
 
 ```text
-conv_output 使用 NPU stride=1 的中间输出尺寸计算偏移。
-dsmp_output / output 使用下采样后的真实输出尺寸计算偏移。
+conv_output 使用 NPU stride=1 的中间输出存储尺寸计算偏移。
+dsmp_output / output 使用下采样后的输出存储尺寸计算偏移。
 bias 使用 int32 bias word 计算偏移。
 ```
 
@@ -336,7 +345,7 @@ bias
 output
 ```
 
-其中 `conv_output` 按 NPU stride=1 中间图尺寸计算，`dsmp_output` 和 `output` 按下采样后的输出矩阵大小计算，`bias` 按 32-bit bias word 计算。对于第二层：
+其中 `conv_output` 按 NPU stride=1 中间图存储尺寸计算，`dsmp_output` 和 `output` 按下采样后的输出存储矩阵大小计算，`bias` 按 32-bit bias word 计算。对于第二层：
 
 ```text
 group0.conv_output = 8 * 256 * 256 = 0x00080000 bytes
@@ -422,4 +431,4 @@ runtime_end_addr_exclusive
 
 `execution_plan.splits` 中的 `offsets_bytes.weight` 和 `conv.weight_addr` 使用参数区物理偏移：每个输出通道 group（默认最多 8 通道，大 feature map 层为 4 通道）先存有效 weight，再存补齐到 4 通道边界的 int32 bias。因此后续 group 的 weight 偏移会跨过前一 group 的 bias；`bias_addr` 记录该 group 自动 bias 读取的起始位置。
 
-运行时 `conv_out`、`dsmp_out`、`relu_out` 仍按 output channel 的 feature-map 大小计算偏移，group 的矩阵在预留区中按通道顺序连续存放。
+运行时 `conv_out`、`dsmp_out`、`relu_out` 按 output channel 的 feature-map 存储大小计算偏移，group 的矩阵在预留区中按通道顺序连续存放。若某个输出矩阵逻辑尺寸小于 8x8，则存储大小按 8x8 参与地址规划，逻辑尺寸仍通过 `logical_*_hw` 字段保留。
