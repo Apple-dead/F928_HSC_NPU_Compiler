@@ -8,12 +8,14 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
+import merge as coe_merge
 import model_parser
 import npu_config as cfg
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUT_PATH = PROJECT_ROOT / "data" / "memory_plan.json"
+MIN_RUNTIME_FEATURE_HW = 8
 
 
 def align_up(value: int, alignment: int = 4) -> int:
@@ -75,6 +77,10 @@ def feature_map_elements(height: int, width: int, channels: int) -> int:
     return height * width * channels
 
 
+def runtime_storage_hw(height: int, width: int) -> tuple[int, int]:
+    return max(height, MIN_RUNTIME_FEATURE_HW), max(width, MIN_RUNTIME_FEATURE_HW)
+
+
 def channel_group_max_channels(
     *,
     input_h: int,
@@ -100,12 +106,13 @@ def instr_count_for_layers(layers: List[Dict[str, Any]], input_h: int, input_w: 
         aligned_in_ch = aligned_channels(conv["in_channels"])
         aligned_out_ch = aligned_channels(conv["out_channels"])
         out_h, out_w = model_parser.conv_output_hw(height, width, conv)
+        storage_out_h, storage_out_w = runtime_storage_hw(out_h, out_w)
         max_channels = channel_group_max_channels(
             input_h=height,
             input_w=width,
             aligned_in_ch=aligned_in_ch,
-            output_h=out_h,
-            output_w=out_w,
+            output_h=storage_out_h,
+            output_w=storage_out_w,
             aligned_out_ch=aligned_out_ch,
         )
         split_count = len(npu_channel_groups(conv["out_channels"], aligned_out_ch, max_channels=max_channels))
@@ -113,7 +120,7 @@ def instr_count_for_layers(layers: List[Dict[str, Any]], input_h: int, input_w: 
         if layer_needs_dsmp(conv):
             per_split += 6
         total += split_count * per_split
-        height, width = out_h, out_w
+        height, width = storage_out_h, storage_out_w
     return total
 
 
@@ -178,22 +185,26 @@ def build_layer_execution_plan(
     relu_out_tensor: Dict[str, Any],
     conv_out_h: int,
     conv_out_w: int,
+    conv_storage_h: int,
+    conv_storage_w: int,
+    output_storage_h: int,
+    output_storage_w: int,
 ) -> Dict[str, Any]:
     if in_ch > 256:
         raise NotImplementedError(f"{layer_name}: conv input channels > 256 are not supported by current NPU.")
 
     bytes_per_weight_output_channel = aligned_in_ch * kh * kw
-    bytes_per_conv_feature_channel = conv_out_h * conv_out_w
-    bytes_per_feature_channel = out_h * out_w
+    bytes_per_conv_feature_channel = conv_storage_h * conv_storage_w
+    bytes_per_feature_channel = output_storage_h * output_storage_w
     has_dsmp = dsmp_out_tensor is not None
     input_feature_elements = feature_map_elements(input_h, input_w, aligned_in_ch)
-    output_feature_elements = feature_map_elements(out_h, out_w, aligned_out_ch)
+    output_feature_elements = feature_map_elements(output_storage_h, output_storage_w, aligned_out_ch)
     max_group_channels = channel_group_max_channels(
         input_h=input_h,
         input_w=input_w,
         aligned_in_ch=aligned_in_ch,
-        output_h=out_h,
-        output_w=out_w,
+        output_h=output_storage_h,
+        output_w=output_storage_w,
         aligned_out_ch=aligned_out_ch,
     )
     splits: List[Dict[str, Any]] = []
@@ -237,7 +248,7 @@ def build_layer_execution_plan(
             item["dsmp"] = {
                 "input_addr": hex_addr(addr_to_int(conv_out_tensor["addr"]) + conv_feature_offset),
                 "output_addr": hex_addr(addr_to_int(dsmp_out_tensor["addr"]) + feature_offset),
-                "image_size": conv_out_h,
+                "image_size": conv_storage_h,
                 "channels": group["valid_channels"],
             }
             relu_input_addr = hex_addr(addr_to_int(dsmp_out_tensor["addr"]) + feature_offset)
@@ -270,9 +281,13 @@ def build_layer_execution_plan(
         "aligned_input_channels": aligned_in_ch,
         "aligned_output_channels": aligned_out_ch,
         "kernel_size": [kh, kw],
-        "conv_output_hw": [conv_out_h, conv_out_w],
+        "input_hw": [input_h, input_w],
+        "logical_conv_output_hw": [conv_out_h, conv_out_w],
+        "conv_output_hw": [conv_storage_h, conv_storage_w],
         "has_dsmp": has_dsmp,
-        "output_hw": [out_h, out_w],
+        "logical_output_hw": [out_h, out_w],
+        "output_hw": [output_storage_h, output_storage_w],
+        "minimum_runtime_feature_hw": MIN_RUNTIME_FEATURE_HW,
         "reserved_regions": {
             "conv_out": {
                 "addr": conv_out_tensor["addr"],
@@ -300,17 +315,71 @@ def build_layer_execution_plan(
     }
 
 
+
+def selected_input_shape(
+    all_layers: List[Dict[str, Any]],
+    selected_layers: List[Dict[str, Any]],
+    image_h: int,
+    image_w: int,
+) -> tuple[int, int, int]:
+    if not selected_layers:
+        raise ValueError("no selected layers")
+
+    start_layer = selected_layers[0]["layer_index"]
+    height = image_h
+    width = image_w
+    channels = all_layers[0]["conv"]["in_channels"]
+
+    for layer in all_layers:
+        idx = layer["layer_index"]
+        conv = layer["conv"]
+        if idx == start_layer:
+            if conv["in_channels"] != channels:
+                raise ValueError(
+                    f"layer{idx} expects {conv['in_channels']} input channels, "
+                    f"but previous model output has {channels} channels"
+                )
+            return height, width, conv["in_channels"]
+
+        if conv["in_channels"] != channels:
+            raise ValueError(
+                f"layer{idx} expects {conv['in_channels']} input channels, "
+                f"but previous model output has {channels} channels"
+            )
+        height, width = model_parser.conv_output_hw(height, width, conv)
+        channels = conv["out_channels"]
+
+    raise ValueError(f"could not derive input shape for layer{start_layer}")
+
+
+def validate_input_coe_size(file_text: str, expected_size: int, input_shape: List[int]) -> None:
+    path = PROJECT_ROOT / file_text
+    if not path.is_file():
+        raise FileNotFoundError(f"input COE not found: {path}")
+    values, _ = coe_merge.read_coe_values(path)
+    actual_size = len(values) * 4
+    if actual_size != expected_size:
+        raise ValueError(
+            f"{path}: input COE size mismatch for start-layer input; "
+            f"file has {actual_size} bytes ({len(values)} 32-bit words), "
+            f"expected {expected_size} bytes for storage_shape_nchw={input_shape}"
+        )
 def build_plan(model_py: Path) -> Dict[str, Any]:
-    layers, relu_cfg = model_parser.parse_model_layers(model_py)
+    all_layers, relu_cfg = model_parser.parse_all_model_layers(model_py)
+    layers = model_parser.select_layers(all_layers)
 
     if cfg.IMAGE_SOURCE not in ("coe", "external"):
         raise ValueError('IMAGE_SOURCE must be "coe" or "external"')
     if cfg.IMAGE_HEIGHT % 8 != 0 or cfg.IMAGE_WIDTH % 8 != 0:
         raise ValueError("image height/width must be divisible by 8")
 
-    image_aligned_ch = aligned_channels(layers[0]["conv"]["in_channels"])
-    image_size = cfg.IMAGE_HEIGHT * cfg.IMAGE_WIDTH * image_aligned_ch
-    instr_size = instr_count_for_layers(layers, cfg.IMAGE_HEIGHT, cfg.IMAGE_WIDTH) * cfg.INSTR_WORD_BYTES
+    input_h, input_w, input_ch = selected_input_shape(all_layers, layers, cfg.IMAGE_HEIGHT, cfg.IMAGE_WIDTH)
+    image_aligned_ch = aligned_channels(input_ch)
+    image_size = input_h * input_w * image_aligned_ch
+    image_file = "coe/image.coe" if cfg.IMAGE_SOURCE == "coe" else None
+    image_addr = cfg.INIT_BASE_ADDR if cfg.IMAGE_SOURCE == "coe" else cfg.IMAGE_BASE_ADDR
+    instr_size = instr_count_for_layers(layers, input_h, input_w) * cfg.INSTR_WORD_BYTES
+    input_storage_shape = [1, image_aligned_ch, input_h, input_w]
 
     plan: Dict[str, Any] = {
         "config": {
@@ -319,24 +388,30 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
             "RUNTIME_BASE_ADDR": hex_addr(cfg.RUNTIME_BASE_ADDR),
             "IMAGE_BASE_ADDR": hex_addr(cfg.IMAGE_BASE_ADDR),
             "IMAGE_SOURCE": cfg.IMAGE_SOURCE,
+            "IMAGE_HEIGHT": cfg.IMAGE_HEIGHT,
+            "IMAGE_WIDTH": cfg.IMAGE_WIDTH,
             "INFER_PARSE_MODE": cfg.INFER_PARSE_MODE,
-            "INFER_PARSE_LAYER_LIMIT": cfg.INFER_PARSE_LAYER_LIMIT,
+            "INFER_PARSE_LAYER_START": cfg.INFER_PARSE_LAYER_START,
+            "INFER_PARSE_LAYER_END": cfg.INFER_PARSE_LAYER_END,
             "CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD": cfg.CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD,
+            "MIN_RUNTIME_FEATURE_HW": MIN_RUNTIME_FEATURE_HW,
             "model_py": str(model_py),
         },
         "relu": relu_cfg,
         "alignment_bytes": 4,
         "image": {
             "source": cfg.IMAGE_SOURCE,
-            "addr": hex_addr(cfg.IMAGE_BASE_ADDR),
-            "channels": layers[0]["conv"]["in_channels"],
+            "addr": hex_addr(image_addr),
+            "input_layer": layers[0]["layer"],
+            "channels": input_ch,
             "aligned_channels": image_aligned_ch,
-            "shape_nchw": [1, layers[0]["conv"]["in_channels"], cfg.IMAGE_HEIGHT, cfg.IMAGE_WIDTH],
-            "storage_shape_nchw": [1, image_aligned_ch, cfg.IMAGE_HEIGHT, cfg.IMAGE_WIDTH],
+            "shape_nchw": [1, input_ch, input_h, input_w],
+            "storage_shape_nchw": input_storage_shape,
             "size_bytes": image_size,
-            "file": "coe/image.coe" if cfg.IMAGE_SOURCE == "coe" else None,
+            "file": image_file,
         },
         "model_layers": layers,
+        "all_model_layers": all_layers,
         "tensors": {},
         "execution_plan": [],
         "init_regions": [],
@@ -348,14 +423,12 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
     if cfg.IMAGE_SOURCE == "coe":
         if cfg.IMAGE_BASE_ADDR != cfg.INIT_BASE_ADDR:
             raise ValueError("IMAGE_SOURCE=coe currently requires IMAGE_BASE_ADDR == INIT_BASE_ADDR")
-        add_init_region(plan, "image", image_size, "coe/image.coe")
-    else:
-        validate_no_overlap(cfg.IMAGE_BASE_ADDR, image_size, cfg.INIT_BASE_ADDR, instr_size, "external image", "init data")
-
+        validate_input_coe_size(image_file, image_size, input_storage_shape)
+        add_init_region(plan, "image", image_size, image_file)
     plan["tensors"]["image"] = plan["image"]
 
-    height = cfg.IMAGE_HEIGHT
-    width = cfg.IMAGE_WIDTH
+    height = input_h
+    width = input_w
     input_tensor = "image"
     for layer in layers:
         idx = layer["layer_index"]
@@ -369,6 +442,8 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
         needs_dsmp = layer_needs_dsmp(conv)
         out_h, out_w = model_parser.conv_output_hw(height, width, conv)
         conv_out_h, conv_out_w = (height, width) if needs_dsmp else (out_h, out_w)
+        conv_storage_h, conv_storage_w = runtime_storage_hw(conv_out_h, conv_out_w)
+        output_storage_h, output_storage_w = runtime_storage_hw(out_h, out_w)
 
         if idx == 1 and input_tensor == "image" and in_ch != plan["image"]["channels"]:
             raise ValueError(f"{layer_name} in_channels does not match image channels")
@@ -376,8 +451,8 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
         weight_size = out_ch * aligned_in_ch * kh * kw
         bias_size = aligned_out_ch * 4
         parameter_size = weight_size + bias_size
-        conv_output_size = conv_out_h * conv_out_w * aligned_out_ch
-        output_size = out_h * out_w * aligned_out_ch
+        conv_output_size = conv_storage_h * conv_storage_w * aligned_out_ch
+        output_size = output_storage_h * output_storage_w * aligned_out_ch
         params = add_init_region(plan, f"{layer_name}_params", parameter_size, f"coe/{layer_name}_params.coe")
 
         weight_tensor = {
@@ -410,13 +485,13 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
 
         runtime_tensors: Dict[str, Dict[str, Any]] = {}
         runtime_specs = [
-            ("conv", conv_output_size, conv_out_h, conv_out_w),
+            ("conv", conv_output_size, conv_out_h, conv_out_w, conv_storage_h, conv_storage_w),
         ]
         if needs_dsmp:
-            runtime_specs.append(("dsmp", output_size, out_h, out_w))
-        runtime_specs.append(("relu", output_size, out_h, out_w))
+            runtime_specs.append(("dsmp", output_size, out_h, out_w, output_storage_h, output_storage_w))
+        runtime_specs.append(("relu", output_size, out_h, out_w, output_storage_h, output_storage_w))
 
-        for op_name, region_size, region_h, region_w in runtime_specs:
+        for op_name, region_size, region_h, region_w, storage_h, storage_w in runtime_specs:
             tensor_name = f"{layer_name}_{op_name}_out"
             runtime = add_runtime_region(
                 plan,
@@ -425,7 +500,8 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
                 channels=out_ch,
                 aligned_channels=aligned_out_ch,
                 shape_nchw=[1, out_ch, region_h, region_w],
-                storage_shape_nchw=[1, aligned_out_ch, region_h, region_w],
+                storage_shape_nchw=[1, aligned_out_ch, storage_h, storage_w],
+                minimum_runtime_feature_hw=MIN_RUNTIME_FEATURE_HW,
             )
             plan["tensors"][tensor_name] = runtime
             runtime_tensors[op_name] = runtime
@@ -450,11 +526,15 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
                 relu_out_tensor=runtime_tensors["relu"],
                 conv_out_h=conv_out_h,
                 conv_out_w=conv_out_w,
+                conv_storage_h=conv_storage_h,
+                conv_storage_w=conv_storage_w,
+                output_storage_h=output_storage_h,
+                output_storage_w=output_storage_w,
             )
         )
 
         input_tensor = f"{layer_name}_relu_out"
-        height, width = out_h, out_w
+        height, width = output_storage_h, output_storage_w
 
     instr = add_init_region(plan, "instr", instr_size, "coe/instr.coe")
     plan["tensors"]["instr"] = instr
@@ -468,6 +548,24 @@ def build_plan(model_py: Path) -> Dict[str, Any]:
         raise ValueError(
             f"RUNTIME_BASE_ADDR {hex_addr(cfg.RUNTIME_BASE_ADDR)} overlaps init address window "
             f"ending at {hex_addr(cfg.INIT_LIMIT_ADDR)}"
+        )
+
+    if cfg.IMAGE_SOURCE == "external":
+        validate_no_overlap(
+            cfg.IMAGE_BASE_ADDR,
+            image_size,
+            cfg.INIT_BASE_ADDR,
+            init_end - cfg.INIT_BASE_ADDR,
+            "external input",
+            "init data",
+        )
+        validate_no_overlap(
+            cfg.IMAGE_BASE_ADDR,
+            image_size,
+            cfg.RUNTIME_BASE_ADDR,
+            plan["_next_runtime_addr"] - cfg.RUNTIME_BASE_ADDR,
+            "external input",
+            "runtime data",
         )
 
     plan["init_end_addr_exclusive"] = hex_addr(init_end)
