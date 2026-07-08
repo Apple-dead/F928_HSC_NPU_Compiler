@@ -20,8 +20,9 @@ IMAGE_BASE_ADDR = 0x00000000
 IMAGE_SOURCE = "coe"
 IMAGE_PATH = "./coe/image.coe"
 
-# Original model input size. The PT2 frontend prefers the exported graph's
-# input metadata and falls back to these values if metadata is unavailable.
+# Fallback input size only. The PT2 frontend and memory planner prefer input
+# shape metadata exported in the PT2 graph. These values are used only when
+# that metadata is missing.
 INPUT_HEIGHT = 28
 INPUT_WIDTH = 28
 

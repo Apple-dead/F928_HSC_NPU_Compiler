@@ -60,7 +60,7 @@ INFER_PARSE_OP_LIMIT
 CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD
 ```
 
-`INPUT_HEIGHT` / `INPUT_WIDTH` 只作为 PT2 输入 metadata 缺失时的 fallback。正常情况下，输入尺寸和通道数来自 `data/model_ir.json`。
+`INPUT_HEIGHT` / `INPUT_WIDTH` 只作为 PT2 输入 shape metadata 缺失时的 fallback。正常情况下，输入尺寸和通道数来自 `data/model_ir.json`，而 `data/model_ir.json` 的 input 字段来自 PT2 graph metadata；只要 PT2 中存在该 metadata，memory plan 就不会使用 `INPUT_HEIGHT` / `INPUT_WIDTH`。
 
 ## 4. 顶层字段
 

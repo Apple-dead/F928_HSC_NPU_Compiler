@@ -15,6 +15,8 @@ INFER_PARSE_MODE = 1
 INFER_PARSE_OP_LIMIT = 0
 ```
 
+`INPUT_HEIGHT` / `INPUT_WIDTH` 只是 fallback 输入尺寸。PT2 前端会优先读取 PT2 graph 中导出的输入 shape metadata；只有 PT2 缺少该 metadata 时，才会使用这两个配置值。
+
 当前只支持 `MODEL_FORMAT = "pt2"`。脚本会调用 `torch.export.load(MODEL_PATH)` 读取 `ExportedProgram`，再生成：
 
 ```text
