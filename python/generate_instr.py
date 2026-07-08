@@ -16,7 +16,6 @@ import npu_config as cfg
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MEMORY_PLAN = PROJECT_ROOT / "data" / "memory_plan.json"
-DEFAULT_INTR_MOVE = PROJECT_ROOT / "data" / "intr_move.json"
 DEFAULT_ASM = PROJECT_ROOT / "data" / "instr.asm"
 DEFAULT_TXT = PROJECT_ROOT / "data" / "instr.txt"
 
@@ -25,6 +24,14 @@ OPERATOR_PATHS = {
     "dsmp": PROJECT_ROOT / "operator" / "dsmp" / "dsmp.py",
     "relu": PROJECT_ROOT / "operator" / "relu" / "relu.py",
 }
+
+
+def resolve_project_path(path_text: str) -> Path:
+    path = Path(path_text)
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+DEFAULT_INTR_MOVE = resolve_project_path(getattr(cfg, "INTR_MOVE_PATH", "./intr_move.json"))
 
 
 def load_operator(op: str):
@@ -47,43 +54,35 @@ def read_json(path: Path) -> Dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def move_to_start_position(move: int | float, *, layer: int, op: str) -> int:
+def move_to_start_position(move: int | float, *, conv_index: int, op: str) -> int:
     value = int(move)
     if value != move:
-        raise ValueError(f"{op} move for layer {layer} must be an integer, got {move!r}")
+        raise ValueError(f"{op} move for conv_index {conv_index} must be an integer, got {move!r}")
     if value == 0:
         return 0
     if value < 0 or value & (value - 1):
-        raise ValueError(f"{op} move for layer {layer} must be a positive power of 2, got {move!r}")
+        raise ValueError(f"{op} move for conv_index {conv_index} must be a positive power of 2, got {move!r}")
     start_position = int(math.log2(value))
     if not 0 <= start_position <= 31:
-        raise ValueError(f"{op} start_position for layer {layer} must fit in 5 bits, got {start_position}")
+        raise ValueError(f"{op} start_position for conv_index {conv_index} must fit in 5 bits, got {start_position}")
     return start_position
 
 
 def load_intr_moves(path: Path) -> Dict[str, Dict[int, int]]:
     data = read_json(path)
-    result: Dict[str, Dict[int, int]] = {}
-    for field in ("CONV_MOVE_BY_LAYER",):
-        raw = data.get(field)
-        if not isinstance(raw, dict):
-            raise ValueError(f"{path} must contain object field {field}")
-        result[field] = {int(layer): int(move) for layer, move in raw.items()}
-    return result
+    field = "CONV_MOVE_BY_INDEX"
+    raw = data.get(field)
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path} must contain object field {field}")
+    return {field: {int(index): int(move) for index, move in raw.items()}}
 
 
-def layer_number(layer_name: str) -> int:
-    if not layer_name.startswith("layer"):
-        raise ValueError(f"unexpected layer name: {layer_name}")
-    return int(layer_name.removeprefix("layer"))
-
-
-def get_start_position(intr_moves: Dict[str, Dict[int, int]], field: str, layer: int, op: str) -> int:
+def get_start_position(intr_moves: Dict[str, Dict[int, int]], field: str, conv_index: int, op: str) -> int:
     try:
-        move = intr_moves[field][layer]
+        move = intr_moves[field][conv_index]
     except KeyError as exc:
-        raise KeyError(f"missing {field} entry for layer {layer}") from exc
-    return move_to_start_position(move, layer=layer, op=op)
+        raise KeyError(f"missing {field} entry for conv_index {conv_index}") from exc
+    return move_to_start_position(move, conv_index=conv_index, op=op)
 
 
 def build_op_plan(
@@ -92,9 +91,10 @@ def build_op_plan(
     op: str,
     intr_moves: Dict[str, Dict[int, int]],
 ) -> Dict[str, Any]:
-    layer = layer_number(layer_plan["layer"])
+    conv_index = int(layer_plan["conv_index"])
     common = {
         "op": op,
+        "conv_index": conv_index,
         "layer": layer_plan["layer"],
         "group_index": split["group_index"],
         "start_channel": split["start_channel"],
@@ -112,7 +112,7 @@ def build_op_plan(
                 "input_channels": layer_plan["input_channels"],
                 "output_channels": split["valid_channels"],
                 "has_bias": bool(split["conv"].get("has_bias", False)),
-                "start_position": get_start_position(intr_moves, "CONV_MOVE_BY_LAYER", layer, "conv"),
+                "start_position": get_start_position(intr_moves, "CONV_MOVE_BY_INDEX", conv_index, "conv"),
             }
         )
         return common
@@ -149,7 +149,8 @@ def build_asm(memory_plan: Dict[str, Any], intr_moves: Dict[str, Dict[int, int]]
             ops = ["conv"]
             if layer_plan.get("has_dsmp"):
                 ops.append("dsmp")
-            ops.append("relu")
+            if "relu" in split:
+                ops.append("relu")
             for op in ops:
                 op_plan = build_op_plan(layer_plan, split, op, intr_moves)
                 asm.extend(operators[op].compile_op(op_plan, memory_plan))

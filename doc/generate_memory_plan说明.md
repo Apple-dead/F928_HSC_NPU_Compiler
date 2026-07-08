@@ -2,59 +2,46 @@
 
 ## 1. 总体功能
 
-`python/generate_memory_plan.py` 根据模型结构和 `python/npu_config.py` 生成 `data/memory_plan.json`。
-
-它负责把模型中的卷积层转换成 NPU 数据构建和后续指令生成需要的统一规划信息，包括：
-
-- 模型解析配置；
-- 输入图像尺寸和存储布局；
-- 每层 weight、bias、指令等初始化数据的地址和大小；
-- 每层 conv / 可选 dsmp / relu 运行时输出缓冲区的地址和大小；
-- 每层在当前 NPU 通道能力下的拆分执行计划。
-
-当前 NPU 卷积和矩阵计算单次最大处理通道数为 8，数据仍按 4 通道对齐。默认情况下，若某层输出通道数大于 8，`memory_plan.json` 会将该层按先 8 后 4 的方式拆成多个通道段，例如 12 输出通道拆成 8 + 4。若该层输入或输出 feature map 的存储元素数（宽 * 高 * 按 4 对齐后的通道数）大于等于 `CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD`，则该层输出通道只按 4 通道 group 拆分，例如 12 输出通道拆成 4 + 4 + 4。
-
-运行时中间 feature map 还遵守 8x8 最小存储尺寸：若某个算子输出通道中的矩阵实际尺寸小于 8x8，NPU 会在写回时补零到 8x8。编译器侧不负责补数据，但在 `runtime_regions`、`execution_plan.splits` 的地址偏移和后续层输入尺寸规划中，都必须把该输出按 8x8 的物理占用计算。当前实现中该常量为 `MIN_RUNTIME_FEATURE_HW = 8`。
-
-当前卷积输入通道数最大支持 256，生成 memory plan 时若超过 256 会直接报错。
-
-当前 `generate_memory_plan.py` 的通道支持范围可以概括为：
-
-- 输入通道数 `<= 256`、输出通道数 `<= 8`：直接生成单个输出通道 split。
-- 输入通道数 `<= 256`、输出通道数 `> 8`：支持生成。默认按 NPU 单次最多 8 输出通道拆分，例如 12 输出通道拆成 8 + 4；当该层输入或输出 feature map 存储元素数大于等于 `CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD` 时，只按 4 输出通道拆分，例如 12 输出通道拆成 4 + 4 + 4。
-- 输入通道数 `> 256`：不支持，直接报错，不生成近似或不完整的 memory plan。
-
-当前 stride / padding 支持范围为：
-
-- `stride = 1`：按普通 `conv -> relu` 规划，bias 由 CONV 指令自动处理。
-- `stride = 2, padding = 0`：按 `conv(stride=1) -> dsmp -> relu` 规划，bias 由 CONV 指令自动处理。
-- `stride > 2`：暂不支持，直接报错。
-- `stride = 2, padding != 0`：暂不支持，直接报错。
-
-## 2. 主要输入
-
-```bash
-python ./python/generate_memory_plan.py yolov2_14layer_quantized.py
-```
-
-模型文件可以直接给文件名；脚本会在 `model/` 下查找。
-
-主要配置来自 `python/npu_config.py`：
+`python/generate_memory_plan.py` 从标准 IR 生成：
 
 ```text
-IMAGE_HEIGHT / IMAGE_WIDTH
-INFER_PARSE_MODE
-INFER_PARSE_LAYER_START / INFER_PARSE_LAYER_END
-CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD
-INIT_BASE_ADDR / INIT_LIMIT_ADDR
-RUNTIME_BASE_ADDR
+data/memory_plan.json
 ```
 
-## 3. 顶层字段
+默认输入：
 
-### config
+```text
+data/model_ir.json
+python/npu_config.py
+IMAGE_PATH 指向的输入 COE
+```
 
-记录生成 memory plan 时使用的配置，例如：
+显式命令：
+
+```bash
+python ./python/generate_memory_plan.py --model-ir ./data/model_ir.json --out ./data/memory_plan.json
+```
+
+该脚本负责把 IR 中后端可支持的 `conv2d/relu` 路径转换为 NPU 地址规划、参数区规划和分组执行计划。
+
+## 2. 后端支持范围
+
+当前 memory plan 阶段只支持：
+
+```text
+conv2d
+relu
+```
+
+如果 IR 中出现暂不支持的 op，会直接报错，不会静默跳过。例如：
+
+```text
+Unsupported op avgpool2d at op id 2. Current backend only supports conv2d/relu path.
+```
+
+## 3. 主要配置
+
+`npu_config.py` 中与本阶段相关的配置包括：
 
 ```text
 INIT_BASE_ADDR
@@ -62,20 +49,28 @@ INIT_LIMIT_ADDR
 RUNTIME_BASE_ADDR
 IMAGE_BASE_ADDR
 IMAGE_SOURCE
+IMAGE_PATH
+MODEL_FORMAT
+MODEL_PATH
+INTR_MOVE_PATH
+INPUT_HEIGHT
+INPUT_WIDTH
 INFER_PARSE_MODE
-INFER_PARSE_LAYER_START / INFER_PARSE_LAYER_END
-model_py
+INFER_PARSE_OP_LIMIT
+CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD
 ```
 
-该字段用于追踪当前 JSON 是按什么配置生成的。
+`INPUT_HEIGHT` / `INPUT_WIDTH` 只作为 PT2 输入 metadata 缺失时的 fallback。正常情况下，输入尺寸和通道数来自 `data/model_ir.json`。
 
-### alignment_bytes
+## 4. 顶层字段
 
-当前初始化区和运行时区地址按 4 字节对齐。
+### config
+
+记录生成 plan 时使用的地址、模型、输入和截位配置路径。`IMAGE_PATH` 和 `INTR_MOVE_PATH` 会写入该字段，便于追踪本次构建使用的输入 COE 和截位配置文件。
 
 ### image
 
-描述当前推理起始层输入 feature map 在内存中的信息。`INFER_PARSE_LAYER_START = 1` 时它是原始输入图像；从中间层开始时，它是该起始层的输入 feature map：
+描述当前输入 feature map：
 
 ```text
 addr
@@ -87,205 +82,96 @@ size_bytes
 file
 ```
 
-其中 `storage_shape_nchw` 是按 4 通道对齐后的实际存储形状。`IMAGE_SOURCE = "coe"` 时，`generate_memory_plan.py` 会检查 `coe/image.coe` 的 32-bit word 数是否等于 `size_bytes / 4`；`IMAGE_SOURCE = "external"` 时，输入不进入 `init_regions`，地址来自 `IMAGE_BASE_ADDR`。
+`IMAGE_SOURCE = "coe"` 时，脚本会校验 `IMAGE_PATH` 指向的 COE 文件的 32-bit word 数是否等于 `image.size_bytes / 4`。输入 feature map 的逻辑尺寸来自 IR；物理存储尺寸会按至少 `8x8` 且 H/W 为 8 的倍数预留。
+
+### model_ops
+
+保存从 IR 读取的完整 op 列表，便于排查 unsupported op。
 
 ### model_layers
 
-记录从模型 `.py` 中解析出的卷积层参数：
+保存后端可处理的 conv 层信息。每个 conv 都带有：
 
 ```text
+conv_index
 layer_index
 layer
-conv.in_channels
-conv.out_channels
-conv.kernel_size
-conv.stride
-conv.padding
+has_relu
+conv
 ```
 
-该字段描述模型原始结构，不包含内存地址。
+`conv_index` 表示当前 IR 中第几次 conv，从 1 开始；`layer_index/layer` 仅用于参数文件命名和调试，不用于截位查表。
 
-## 4. tensors
+## 5. tensors
 
-`tensors` 是后续脚本读取最多的字段，保存所有关键数据对象的地址、形状和大小。
-
-常见条目包括：
+常见 tensor：
 
 ```text
 image
 layer1_weight
-layer1_bias
+layer1_params
 layer1_conv_out
-layer2_dsmp_out
 layer1_relu_out
-layer2_weight
-layer2_bias
-...
 instr
 ```
 
-### layerN_weight
-
-描述第 N 层卷积权重：
+有 bias 的 conv 还会包含：
 
 ```text
-addr
-channels.in / channels.out
-aligned_channels.in / aligned_channels.out
-shape_oihw
-storage_shape_oihw
-size_bytes
+layer1_bias
 ```
 
-`shape_oihw` 是模型原始权重形状，`storage_shape_oihw` 是 weight COE 的实际存储形状：输出通道保持有效输出通道数，输入通道补齐到 4 的倍数。`aligned_output_channels` 仍用于 bias、运行时输出和 split 对齐。
+无 bias 的 conv 不创建 `layerN_bias` tensor。
 
-### layerN_bias
+## 6. 参数区布局
 
-描述第 N 层 bias 数据：
+每层使用单一初始化区：
 
 ```text
-addr
-channels
-aligned_channels
-shape
-storage_shape
-size_bytes
+layerN_params
 ```
 
-bias 不再展开为矩阵。当前由 `params_to_bram_coe.py` 读取通道数，把 bias 补 0 到 4 的倍数后按 signed int32 word 写入对应的 `coe/layerN_params.coe`。
-
-### layerN_conv_out / layerN_dsmp_out / layerN_relu_out
-
-描述第 N 层每个运行时阶段的输出缓冲区：
+有 bias：
 
 ```text
-addr
-size_bytes
-channels
-aligned_channels
-shape_nchw
-storage_shape_nchw
+每个 group = valid weights + padded int32 bias
+layerN_params.size_bytes = weight_size + padded_bias_size
+split.conv.has_bias = true
+split.bias_addr 存在
 ```
 
-这些地址是后续生成 conv、dsmp、relu 指令时需要使用的输入输出地址。
-
-`shape_nchw` 记录模型或算子语义上的逻辑输出尺寸；`storage_shape_nchw` 记录运行时真实预留尺寸。运行时输出的高、宽会分别按至少 8 处理，因此逻辑尺寸小于 8x8 时，`size_bytes` 使用 `aligned_channels * max(height, 8) * max(width, 8)` 计算。后续层把上一次输出当作这个存储尺寸继续规划。
-
-对于 `stride=2,padding=0` 的层，会额外生成：
+无 bias：
 
 ```text
-layerN_dsmp_out
+每个 group = valid weights
+layerN_params.size_bytes = weight_size
+layerN_bias tensor 不存在
+split.conv.has_bias = false
+split.bias_addr = null
+split.offsets_bytes.bias = null
+split.size_bytes.bias = 0
 ```
 
-此时 `layerN_conv_out` 是 NPU stride=1 卷积后的完整尺寸中间结果，`layerN_dsmp_out` 才是模型语义上的 stride=2 输出结果。后续 `relu` 接在 `dsmp_out` 后面。
+## 7. execution_plan
 
-## 5. execution_plan
-
-`execution_plan` 是为后续指令生成准备的分段执行计划。
-
-每一层有一个执行计划条目：
+每个 layer plan 包含：
 
 ```text
+conv_index
 layer
-npu_max_channels_per_pass
-channel_alignment
 input_channels
 output_channels
-aligned_input_channels
-aligned_output_channels
 kernel_size
+input_hw
 logical_conv_output_hw
 conv_output_hw
 logical_output_hw
 output_hw
+has_bias
+has_relu
+has_dsmp
 reserved_regions
 splits
-```
-
-`logical_conv_output_hw` / `logical_output_hw` 是模型语义尺寸；`conv_output_hw` / `output_hw` 是 NPU 可见尺寸，已经应用运行时 8x8 最小存储规则。`generate_instr.py` 直接使用 `conv_output_hw` 和 `output_hw` 生成 CONV、DSMP、ReLU 的尺寸字段。
-
-### stride=2 的 DSMP 规划
-
-当模型层满足：
-
-```text
-stride = 2
-padding = 0
-```
-
-时，memory plan 会为该层规划额外的 DSMP 阶段：
-
-```text
-conv(stride=1) -> dsmp -> relu
-```
-
-例如 layer2 输入为 `256 x 256`，模型输出应为 `128 x 128`：
-
-```text
-layer2_conv_out:
-  shape = [1, 12, 256, 256]
-
-layer2_dsmp_out:
-  shape = [1, 12, 128, 128]
-
-layer2_relu_out:
-  shape = [1, 12, 128, 128]
-```
-
-其中 `conv_out` 是 NPU stride=1 产生的中间结果，`dsmp_out` 是下采样后的结果。
-
-### reserved_regions
-
-`reserved_regions` 记录该层在运行时区中一次性预留好的完整输出空间：
-
-```text
-conv_out
-dsmp_out   # 仅 stride=2,padding=0 的层存在
-relu_out
-```
-
-每个区域包含：
-
-```text
-addr
-size_bytes
-layout
-```
-
-规划方式是先为该层完整的卷积输出、可选下采样输出和 ReLU 输出分别预留总空间，然后每个 split 按通道段连续写入对应区域。预留空间按运行时存储尺寸计算；当逻辑矩阵小于 8x8 时，这里的 `size_bytes` 会按 8x8 预留。
-
-例如第二层输出通道为 12，输入 feature map 存储大小为 `256 * 256 * 4`，达到默认阈值 `CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD = 256 * 256 * 4`，因此按 4 + 4 + 4 拆成三个 group：
-
-```text
-layer2_conv_out 总空间:
-  base = 0x00280000
-  size = 12 * 256 * 256 = 0x000C0000 bytes
-
-group0 conv output:
-  start = 0x00280000
-  size  = 4 * 256 * 256 = 0x00040000 bytes
-
-group1 conv output:
-  start = 0x002C0000
-  size  = 4 * 256 * 256 = 0x00040000 bytes
-
-group2 conv output:
-  start = 0x00300000
-  size  = 4 * 256 * 256 = 0x00040000 bytes
-```
-
-因此 group1 的 conv 数据紧跟 group0 之后。`dsmp_out` 和 `relu_out` 使用同样的紧密排列方式，但它们的空间尺寸是下采样后的 `128 x 128`。
-
-### splits
-
-`splits` 描述该层被拆成几个 NPU pass。
-
-对于输出通道数小于等于 8 的层，通常只有一个 split。对于 `3 -> 12` 的第二层，由于输入 feature map 存储元素数达到阈值，会拆成三个 split：
-
-```text
-group0: output channel 0..3
-group1: output channel 4..7
-group2: output channel 8..11
 ```
 
 每个 split 包含：
@@ -295,140 +181,33 @@ group_index
 start_channel
 channels
 valid_channels
-has_padding
 offsets_bytes
 size_bytes
 conv
-dsmp   # 仅 stride=2,padding=0 的层存在
 relu
+dsmp    # 仅 stride=2,padding=0 时存在
 ```
 
-### offsets_bytes
+`conv_index` 会传给 `generate_instr.py`，用于按 `CONV_MOVE_BY_INDEX` 查找该 conv 的 move。
 
-记录该 split 在对应数据区中的相对字节偏移：
+当 IR 只截断到 conv，例如 `INFER_PARSE_MODE=2` 且 `INFER_PARSE_OP_LIMIT=1`，memory plan 不会自动补 ReLU：
 
 ```text
-weight
-conv_output
-dsmp_output
-bias
-output
+has_relu = false
+reserved_regions 中没有 relu_out
+split 中没有 relu
+generate_instr.py 只生成 CONV 和 END
 ```
 
-例如第二层 `3 -> 12, 2x2`：
+当 IR 包含 `conv2d -> relu`，memory plan 才会规划 ReLU 阶段。
 
-```text
-group0.weight = 0x00000000
-group1.weight = 0x00000080
+## 8. 通道和尺寸规划
 
-group0.bias   = 0x00000000
-group1.bias   = 0x00000020
-```
-
-对于 stride=2 的层：
-
-```text
-conv_output 使用 NPU stride=1 的中间输出存储尺寸计算偏移。
-dsmp_output / output 使用下采样后的输出存储尺寸计算偏移。
-bias 使用 int32 bias word 计算偏移。
-```
-
-### size_bytes
-
-记录该 split 实际占用的字节数：
-
-```text
-weight
-conv_output
-dsmp_output
-bias
-output
-```
-
-其中 `conv_output` 按 NPU stride=1 中间图存储尺寸计算，`dsmp_output` 和 `output` 按下采样后的输出存储矩阵大小计算，`bias` 按 32-bit bias word 计算。对于第二层：
-
-```text
-group0.conv_output = 8 * 256 * 256 = 0x00080000 bytes
-group1.conv_output = 4 * 256 * 256 = 0x00040000 bytes
-
-group0.output      = 8 * 128 * 128 = 0x00020000 bytes
-group1.output      = 4 * 128 * 128 = 0x00010000 bytes
-```
-
-该字段与 `offsets_bytes` 配合，可以确认多个 group 在同一总预留区域中是紧密连续排列的。
-
-### conv / dsmp / relu
-
-记录每个 split 对应的实际指令地址：
-
-```text
-conv.input_addr
-conv.weight_addr
-conv.output_addr
-
-dsmp.input_addr
-dsmp.output_addr
-dsmp.image_size
-dsmp.channels
-
-relu.input_addr
-relu.output_addr
-```
-
-这些字段使后续 `generate_instr.py` 可以直接知道每一次卷积、下采样和激活要读写哪些地址。
-
-## 6. init_regions 和 runtime_regions
-
-### init_regions
-
-记录初始化数据区中的连续布局顺序：
-
-```text
-image
-layer1_weight
-layer1_bias
-layer2_weight
-layer2_bias
-instr
-```
-
-每个区域包含：
-
-```text
-name
-addr
-size_bytes
-end_addr_exclusive
-file
-```
-
-### runtime_regions
-
-记录运行时输出缓冲区布局：
-
-```text
-layer1_conv_out
-layer1_relu_out
-layer2_conv_out
-layer2_dsmp_out
-layer2_relu_out
-```
-
-每个区域包含地址、大小、通道数和 shape 信息。
-
-## 7. 结束地址
-
-```text
-init_end_addr_exclusive
-runtime_end_addr_exclusive
-```
-
-这两个字段分别表示初始化区和运行时区当前规划后的结束地址，用于检查是否越界或与其他区域冲突。
-
-## 8. 参数区分组布局（当前实现）
-
-`init_regions` 对每层使用单一的 `layerN_params` 项，替代原先分离的 `layerN_weight` 和 `layerN_bias` 项。其地址为原 weight 起始地址，大小为原 weight+bias 之和。
-
-`execution_plan.splits` 中的 `offsets_bytes.weight` 和 `conv.weight_addr` 使用参数区物理偏移：每个输出通道 group（默认最多 8 通道，大 feature map 层为 4 通道）先存有效 weight，再存补齐到 4 通道边界的 int32 bias。因此后续 group 的 weight 偏移会跨过前一 group 的 bias；`bias_addr` 记录该 group 自动 bias 读取的起始位置。
-
-运行时 `conv_out`、`dsmp_out`、`relu_out` 按 output channel 的 feature-map 存储大小计算偏移，group 的矩阵在预留区中按通道顺序连续存放。若某个输出矩阵逻辑尺寸小于 8x8，则存储大小按 8x8 参与地址规划，逻辑尺寸仍通过 `logical_*_hw` 字段保留。
+- 数据按 4 通道对齐。
+- 单次 NPU pass 最多处理 8 个输出通道。
+- 大 feature map 层可按 4 通道 group 拆分。
+- conv 输入通道数当前最大支持 256。
+- 输入和运行时 feature map 最小按 `8x8` 预留，且 H/W 按 8 对齐。
+- `stride=1` 规划为 `conv -> relu`。
+- `stride=2,padding=0` 规划为 `conv(stride=1) -> dsmp -> relu`。
+- `stride>2` 或 `stride=2,padding!=0` 会报错。

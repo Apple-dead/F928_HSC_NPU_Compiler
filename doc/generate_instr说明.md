@@ -2,21 +2,22 @@
 
 ## 1. 总体功能
 
-`python/generate_instr.py` 根据 `data/memory_plan.json` 直接生成 NPU 汇编和机器码文本：
+`python/generate_instr.py` 根据 `data/memory_plan.json` 生成 NPU 汇编和机器码文本：
 
 ```text
 data/instr.asm
 data/instr.txt
 ```
 
-当前脚本不再读取 `data/infer_ir/*.json`。所有层、group、地址、DSMP 规划和通道拆分信息都来自 `memory_plan.json` 的 `execution_plan` 字段。
+脚本不再读取旧的 `data/infer_ir/*.json`。层、group、地址、DSMP 规划、ReLU 规划和通道拆分信息均来自 `memory_plan.json` 的 `execution_plan` 字段。
 
-## 2. 输入和输出
+## 2. 输入输出
 
 默认输入：
 
 ```text
 data/memory_plan.json
+./intr_move.json
 ```
 
 默认输出：
@@ -32,32 +33,35 @@ data/instr.txt
 python ./python/generate_instr.py
 ```
 
-### intr_move.json
+`intr_move.json` 的默认路径由 `python/npu_config.py` 配置：
 
-默认还会读取：
-
-```text
-data/intr_move.json
+```python
+INTR_MOVE_PATH = "./intr_move.json"
 ```
 
-也可以显式指定起始比特位配置文件：
+也可以临时覆盖：
 
 ```bash
-python ./python/generate_instr.py --intr-move ./data/intr_move.json
+python ./python/generate_instr.py --intr-move ./intr_move.json
 ```
 
-`intr_move.json` 用于配置每层 conv 的 move 值：
+## 3. CONV_MOVE_BY_INDEX
+
+`intr_move.json` 用于配置当前 IR 中第 N 次 conv 的截位 move：
 
 ```json
 {
-  "CONV_MOVE_BY_LAYER": {
+  "CONV_MOVE_BY_INDEX": {
     "1": 512,
-    "2": 512
+    "2": 64,
+    "3": 256
   }
 }
 ```
 
-生成指令时，脚本会把 move 值转换为配置寄存器中的起始比特位：
+`CONV_MOVE_BY_INDEX["1"]` 表示当前参与编译的第一条 conv，`CONV_MOVE_BY_INDEX["2"]` 表示第二条 conv。它不再表示 `layer1/layer2` 这种模型层名。
+
+生成指令时，同一个 conv 的所有 channel group 共用该 `conv_index` 对应的 move。脚本会把 move 转换为配置寄存器中的起始比特位：
 
 ```text
 start_position = log2(move)
@@ -70,33 +74,25 @@ move = 512 = 2^9
 start_position = 9
 ```
 
-该值会传给 `operator/conv/conv.py`，由 operator 编码进 `RCONV` 配置寄存器。`move=0` 时起始比特位直接取 0；非 0 的 move 必须是正的 2 的幂，否则脚本会报错。
+`move=0` 时起始比特位为 0；非 0 的 move 必须是正的 2 的幂，否则脚本直接报错。若当前 `memory_plan.execution_plan` 中存在某个 `conv_index`，但 `intr_move.json` 没有对应条目，也会直接报错。
 
-## 3. 执行流程
+## 4. 执行流程
 
-脚本读取 `memory_plan.json` 后，按 `execution_plan` 的层顺序处理：
+脚本按 `execution_plan` 的顺序处理每个 layer plan，再按每个 layer plan 中的 `splits` 顺序处理 group。
 
-```text
-layer1
-layer2
-...
-```
-
-每一层再按 `splits` 中的 group 顺序处理：
-
-```text
-group0
-group1
-...
-```
-
-对于普通层，每个 group 生成：
+普通层生成：
 
 ```text
 conv -> relu
 ```
 
-对于 `stride=2,padding=0` 的层，每个 group 生成：
+当 IR 只截断到 conv 时，只生成：
+
+```text
+conv
+```
+
+`stride=2,padding=0` 的层生成：
 
 ```text
 conv -> dsmp -> relu
@@ -104,9 +100,9 @@ conv -> dsmp -> relu
 
 其中 DSMP 的输入地址、输出地址、图像尺寸和通道数都来自 `memory_plan.json`。
 
-## 4. operator 调用
+## 5. operator 调用
 
-`generate_instr.py` 不直接拼具体寄存器配置细节，而是按算子调用：
+`generate_instr.py` 不直接拼具体寄存器配置，而是调用：
 
 ```text
 operator/conv/conv.py
@@ -114,13 +110,11 @@ operator/dsmp/dsmp.py
 operator/relu/relu.py
 ```
 
-每个 operator 接收当前 group 的执行描述，完成合法性检查和汇编片段生成。
+每个 operator 接收当前 group 的执行描述，完成合法性检查和汇编片段生成。conv 的 `start_position` 来自 `CONV_MOVE_BY_INDEX`。
 
-## 5. 指令大小校验
+## 6. 指令大小校验
 
-生成汇编后，脚本调用 `assembler.py` 将汇编转成 32-bit 指令 word。
-
-随后会检查：
+生成汇编后，脚本调用 `assembler.py` 转成 32-bit 指令 word，并检查：
 
 ```text
 generated_instruction_bytes == memory_plan["tensors"]["instr"]["size_bytes"]
