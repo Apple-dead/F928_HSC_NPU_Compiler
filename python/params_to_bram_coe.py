@@ -16,10 +16,11 @@ def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def build_layer_bytes(layer_plan: dict, weight_tensor: dict, raw_weights, raw_biases) -> list[int]:
+def build_layer_bytes(layer_plan: dict, weight_tensor: dict, raw_weights, raw_biases=None) -> list[int]:
     out_ch, in_ch, kernel_h, kernel_w = weight_shape(layer_plan["layer"] + "_weight", weight_tensor)
     weight_units, padded_in_ch, _ = convert_weights(raw_weights, in_ch, out_ch, kernel_h, kernel_w)
-    bias_words = bias_values_to_words(raw_biases, out_ch)
+    has_bias = bool(layer_plan.get("has_bias", False))
+    bias_words = bias_values_to_words(raw_biases, out_ch) if has_bias else []
     bytes_per_output = padded_in_ch * kernel_h * kernel_w
     result: list[int] = []
 
@@ -30,9 +31,10 @@ def build_layer_bytes(layer_plan: dict, weight_tensor: dict, raw_weights, raw_bi
         weight_start = start * bytes_per_output
         weight_end = weight_start + valid * bytes_per_output
         result.extend(weight_units[weight_start:weight_end])
-        for word in bias_words[start : start + valid]:
-            result.extend(word.to_bytes(4, byteorder="little", signed=False))
-        result.extend(b"\x00" * ((channels - valid) * 4))
+        if has_bias:
+            for word in bias_words[start : start + valid]:
+                result.extend(word.to_bytes(4, byteorder="little", signed=False))
+            result.extend(b"\x00" * ((channels - valid) * 4))
 
     return result
 
@@ -49,11 +51,13 @@ def main() -> None:
     for layer_plan in plan.get("execution_plan", []):
         layer_name = layer_plan["layer"]
         layer = int(layer_name.removeprefix("layer"))
+        bias_path = args.model_params / f"layer{layer}_0_bias.txt"
+        raw_biases = parse_numbers(bias_path) if layer_plan.get("has_bias", False) else None
         units = build_layer_bytes(
             layer_plan,
             tensors[f"{layer_name}_weight"],
             read_weight_txt(args.model_params / f"layer{layer}_0_weight.txt"),
-            parse_numbers(args.model_params / f"layer{layer}_0_bias.txt"),
+            raw_biases,
         )
         expected_size = int(tensors[f"{layer_name}_params"]["size_bytes"])
         if len(units) != expected_size:

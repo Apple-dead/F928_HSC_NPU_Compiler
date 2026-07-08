@@ -3,16 +3,10 @@ setlocal
 
 cd /d "%~dp0"
 
-rem ========MODEL========
-set "MODEL_NAME=yolov2_fixed.pth"
-set "MODEL_PY_NAME=yolov2_14layer_quantized.py"
-
 rem ===========DATA=============
-set "IMAGE_PATH=.\data\image.jpg"
 set "INSTR_PATH=.\data\instr.txt"
 
 rem ===========COE=============
-set "IMAGE_COE_PATH=.\coe\image.coe"
 set "INSTR_COE_PATH=.\coe\instr.coe"
 
 rem ===========TARGET COE=============
@@ -23,24 +17,27 @@ if "%~1"=="clean" (
     exit /b %ERRORLEVEL%
 )
 
+if "%~1"=="distclean" (
+    call :clean
+    if errorlevel 1 exit /b 1
+    call :distclean
+    exit /b %ERRORLEVEL%
+)
+
 if not "%~1"=="" (
-    echo Usage: build.bat [clean] 1>&2
+    echo Usage: build.bat [clean^|distclean] 1>&2
     exit /b 1
 )
 
-python .\python\extract_pth_params.py ".\model\%MODEL_NAME%" ".\data\model_params"
+python .\python\generate_model_ir.py
 if errorlevel 1 exit /b 1
 
 rem generate memory plan / instructions
-python .\python\generate_memory_plan.py "%MODEL_PY_NAME%"
+python .\python\generate_memory_plan.py
 if errorlevel 1 exit /b 1
 
 python .\python\generate_instr.py
 if errorlevel 1 exit /b 1
-
-rem image to coe
-rem python .\python\image_to_bram_coe.py "%IMAGE_PATH%" "%IMAGE_COE_PATH%"
-rem if errorlevel 1 exit /b 1
 
 rem interleaved weight/bias parameter coe
 python .\python\params_to_bram_coe.py --memory-plan .\data\memory_plan.json --model-params .\data\model_params --out-dir .\coe
@@ -59,6 +56,8 @@ exit /b 0
 :clean
 echo [CLEAN] remove generated files
 if exist ".\data\model_params" rmdir /s /q ".\data\model_params"
+if exist ".\data\tmp_regression" rmdir /s /q ".\data\tmp_regression"
+if exist ".\data\model_ir.json" del /q ".\data\model_ir.json"
 if exist ".\data\memory_plan.json" del /q ".\data\memory_plan.json"
 if exist ".\data\instr.asm" del /q ".\data\instr.asm"
 if exist ".\data\instr.txt" del /q ".\data\instr.txt"
@@ -70,4 +69,14 @@ for /d /r %%D in (__pycache__) do (
     if exist "%%D" rmdir /s /q "%%D"
 )
 echo [CLEAN] done
+exit /b 0
+
+:distclean
+echo [DISTCLEAN] remove regression error logs
+if exist ".\test\error" (
+    del /q ".\test\error\*.log" 2>nul
+    del /q ".\test\error\*.log.txt" 2>nul
+    del /q ".\test\error\*.txt" 2>nul
+)
+echo [DISTCLEAN] done
 exit /b 0
