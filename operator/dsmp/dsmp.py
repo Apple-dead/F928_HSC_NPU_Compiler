@@ -20,6 +20,8 @@ def cfg_addr(reg: str, addr: int) -> List[str]:
 def encode_rdsmp(image_size: int, channels: int) -> int:
     if not 1 <= image_size <= 1024:
         raise ValueError(f"dsmp image_size must be in [1, 1024], got {image_size}")
+    if image_size % 8 != 0:
+        raise ValueError(f"dsmp image_size must be divisible by 8, got {image_size}")
     if not 1 <= channels <= 8:
         raise ValueError(f"dsmp channels per pass must be <= 8, got {channels}")
     return ((image_size - 1) << 22) | ((channels - 1) << 17)

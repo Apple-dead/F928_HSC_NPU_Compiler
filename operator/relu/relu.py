@@ -24,6 +24,8 @@ def split_u32(value: int) -> Tuple[int, int]:
 def encode_rrelu(feature_size: int, channels: int, tan: int) -> int:
     if not 1 <= feature_size <= 1024:
         raise ValueError(f"relu feature size must be in [1, 1024], got {feature_size}")
+    if feature_size % 8 != 0:
+        raise ValueError(f"relu feature size must be divisible by 8, got {feature_size}")
     if not 1 <= channels <= 8:
         raise ValueError(f"relu channels per pass must be <= 8, got {channels}")
     if not 0 <= tan <= 0xFF:

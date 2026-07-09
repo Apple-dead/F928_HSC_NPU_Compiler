@@ -5,6 +5,7 @@ SUPPORTED_IR_OPS = {
     "conv2d",
     "relu",
     "avgpool2d",
+    "maxpool2d",
     "flatten",
     "linear",
 }
@@ -12,4 +13,6 @@ SUPPORTED_IR_OPS = {
 BACKEND_SUPPORTED_OPS = {
     "conv2d",
     "relu",
+    "avgpool2d",
+    "maxpool2d",
 }

@@ -9,7 +9,7 @@ data/instr.asm
 data/instr.txt
 ```
 
-脚本不再读取旧的 `data/infer_ir/*.json`。层、group、地址、DSMP 规划、ReLU 规划和通道拆分信息均来自 `memory_plan.json` 的 `execution_plan` 字段。
+脚本不再读取旧的 `data/infer_ir/*.json`。层、group、地址、DSMP/ReLU/AVGPOOL/MAXPOOL 规划和通道拆分信息均来自 `memory_plan.json` 的 `execution_plan` 字段。
 
 ## 2. 输入输出
 
@@ -99,6 +99,20 @@ conv -> dsmp -> relu
 ```
 
 其中 DSMP 的输入地址、输出地址、图像尺寸和通道数都来自 `memory_plan.json`。
+
+AVGPOOL/MAXPOOL 作为独立 stage 写入 `execution_plan`，`op_type` 分别为 `avgpool` / `maxpool`。每个 split 固定 4 通道，`generate_instr.py` 会调用对应 operator 生成：
+
+```asm
+CFG_REGISTER AVGPOOL_P, ...
+AVGPOOL R1, R2
+```
+
+或：
+
+```asm
+CFG_REGISTER MAXPOOL_P, ...
+MAXPOOL R1, R2
+```
 
 ## 5. operator 调用
 

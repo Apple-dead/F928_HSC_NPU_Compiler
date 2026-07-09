@@ -10,6 +10,8 @@
 operator/conv/conv.py
 operator/dsmp/dsmp.py
 operator/relu/relu.py
+operator/avgpool/avgpool.py
+operator/maxpool/maxpool.py
 ```
 
 这些文件不再负责全局内存规划，也不再判断某一层应如何拆分。通道拆分、地址偏移、DSMP 是否需要插入等信息由 `generate_memory_plan.py` 统一写入 `memory_plan.json`。
@@ -92,3 +94,24 @@ DSMP_P = 图像尺寸 + 通道数
 ```
 
 DSMP 当前同样按每次最多 8 通道处理。
+
+## 7. AVGPOOL / MAXPOOL
+
+`operator/avgpool/avgpool.py` 和 `operator/maxpool/maxpool.py` 负责生成专用池化指令：
+
+```asm
+CFG_REGISTER AVGPOOL_P, ...
+AVGPOOL R1, R2
+
+CFG_REGISTER MAXPOOL_P, ...
+MAXPOOL R1, R2
+```
+
+其中：
+```text
+R1 = 池化输入地址
+R2 = 池化输出地址
+AVGPOOL_P / MAXPOOL_P = 输入矩阵边长 / 8
+```
+
+池化单次固定处理 4 通道。`generate_memory_plan.py` 会按 4 通道拆分，确保多次池化的输出在内存中紧密排列。

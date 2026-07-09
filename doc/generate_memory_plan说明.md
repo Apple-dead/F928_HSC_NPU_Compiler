@@ -36,7 +36,7 @@ relu
 如果 IR 中出现暂不支持的 op，会直接报错，不会静默跳过。例如：
 
 ```text
-Unsupported op avgpool2d at op id 2. Current backend only supports conv2d/relu path.
+Unsupported op flatten at op id 3. Current backend only supports conv2d/relu/avgpool2d/maxpool2d path.
 ```
 
 ## 3. 主要配置

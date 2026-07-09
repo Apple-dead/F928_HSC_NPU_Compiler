@@ -23,6 +23,14 @@ OPERATOR_PATHS = {
     "conv": PROJECT_ROOT / "operator" / "conv" / "conv.py",
     "dsmp": PROJECT_ROOT / "operator" / "dsmp" / "dsmp.py",
     "relu": PROJECT_ROOT / "operator" / "relu" / "relu.py",
+    "avgpool": PROJECT_ROOT / "operator" / "avgpool" / "avgpool.py",
+    "maxpool": PROJECT_ROOT / "operator" / "maxpool" / "maxpool.py",
+}
+
+
+SINGLE_OPERATOR_STAGES = {
+    "avgpool": ["avgpool"],
+    "maxpool": ["maxpool"],
 }
 
 
@@ -85,16 +93,10 @@ def get_start_position(intr_moves: Dict[str, Dict[int, int]], field: str, conv_i
     return move_to_start_position(move, conv_index=conv_index, op=op)
 
 
-def build_op_plan(
-    layer_plan: Dict[str, Any],
-    split: Dict[str, Any],
-    op: str,
-    intr_moves: Dict[str, Dict[int, int]],
-) -> Dict[str, Any]:
-    conv_index = int(layer_plan["conv_index"])
-    common = {
+def common_op_plan(layer_plan: Dict[str, Any], split: Dict[str, Any], op: str) -> Dict[str, Any]:
+    return {
         "op": op,
-        "conv_index": conv_index,
+        "conv_index": int(layer_plan.get("conv_index", 0)),
         "layer": layer_plan["layer"],
         "group_index": split["group_index"],
         "start_channel": split["start_channel"],
@@ -103,35 +105,98 @@ def build_op_plan(
         "has_padding": split["has_padding"],
     }
 
-    if op == "conv":
-        common.update(
-            split["conv"]
-            | {
-                "kernel_size": layer_plan["kernel_size"],
-                "feature_size": layer_plan["conv_output_hw"][1],
-                "input_channels": layer_plan["input_channels"],
-                "output_channels": split["valid_channels"],
-                "has_bias": bool(split["conv"].get("has_bias", False)),
-                "start_position": get_start_position(intr_moves, "CONV_MOVE_BY_INDEX", conv_index, "conv"),
-            }
-        )
-        return common
 
-    if op == "dsmp":
-        common.update(split["dsmp"])
-        return common
+def build_conv_op_plan(
+    layer_plan: Dict[str, Any],
+    split: Dict[str, Any],
+    common: Dict[str, Any],
+    intr_moves: Dict[str, Dict[int, int]],
+) -> Dict[str, Any]:
+    conv_index = int(layer_plan["conv_index"])
+    common.update(
+        split["conv"]
+        | {
+            "kernel_size": layer_plan["kernel_size"],
+            "feature_size": layer_plan["conv_output_hw"][1],
+            "input_channels": layer_plan["input_channels"],
+            "output_channels": split["valid_channels"],
+            "has_bias": bool(split["conv"].get("has_bias", False)),
+            "start_position": get_start_position(intr_moves, "CONV_MOVE_BY_INDEX", conv_index, "conv"),
+        }
+    )
+    return common
 
-    if op == "relu":
-        common.update(
-            split["relu"]
-            | {
-                "feature_size": layer_plan["output_hw"][1],
-                "channels": split["valid_channels"],
-            }
-        )
-        return common
 
-    raise ValueError(f"unsupported op: {op}")
+def build_dsmp_op_plan(
+    layer_plan: Dict[str, Any],
+    split: Dict[str, Any],
+    common: Dict[str, Any],
+    intr_moves: Dict[str, Dict[int, int]],
+) -> Dict[str, Any]:
+    common.update(split["dsmp"])
+    return common
+
+
+def build_relu_op_plan(
+    layer_plan: Dict[str, Any],
+    split: Dict[str, Any],
+    common: Dict[str, Any],
+    intr_moves: Dict[str, Dict[int, int]],
+) -> Dict[str, Any]:
+    common.update(
+        split["relu"]
+        | {
+            "feature_size": layer_plan["output_hw"][1],
+            "channels": split["valid_channels"],
+        }
+    )
+    return common
+
+
+def build_pool_op_plan(
+    layer_plan: Dict[str, Any],
+    split: Dict[str, Any],
+    common: Dict[str, Any],
+    intr_moves: Dict[str, Dict[int, int]],
+) -> Dict[str, Any]:
+    common.update(split["pool"])
+    return common
+
+
+OP_PLAN_BUILDERS = {
+    "conv": build_conv_op_plan,
+    "dsmp": build_dsmp_op_plan,
+    "relu": build_relu_op_plan,
+    "avgpool": build_pool_op_plan,
+    "maxpool": build_pool_op_plan,
+}
+
+
+def build_op_plan(
+    layer_plan: Dict[str, Any],
+    split: Dict[str, Any],
+    op: str,
+    intr_moves: Dict[str, Dict[int, int]],
+) -> Dict[str, Any]:
+    try:
+        builder = OP_PLAN_BUILDERS[op]
+    except KeyError as exc:
+        raise ValueError(f"unsupported op: {op}") from exc
+    return builder(layer_plan, split, common_op_plan(layer_plan, split, op), intr_moves)
+
+
+def stage_operator_sequence(layer_plan: Dict[str, Any], split: Dict[str, Any]) -> List[str]:
+    op_type = layer_plan.get("op_type", "conv")
+    if op_type == "conv":
+        ops = ["conv"]
+        if layer_plan.get("has_dsmp"):
+            ops.append("dsmp")
+        if "relu" in split:
+            ops.append("relu")
+        return ops
+    if op_type in SINGLE_OPERATOR_STAGES:
+        return SINGLE_OPERATOR_STAGES[op_type]
+    raise ValueError(f"unsupported execution plan op_type: {op_type}")
 
 
 def build_asm(memory_plan: Dict[str, Any], intr_moves: Dict[str, Dict[int, int]]) -> List[str]:
@@ -146,12 +211,7 @@ def build_asm(memory_plan: Dict[str, Any], intr_moves: Dict[str, Dict[int, int]]
         asm.append(f"; ===== {layer_plan['layer']} =====")
         for split in layer_plan.get("splits", []):
             asm.append(f"; -- group{split['group_index']} ch{split['start_channel']}+{split['channels']} --")
-            ops = ["conv"]
-            if layer_plan.get("has_dsmp"):
-                ops.append("dsmp")
-            if "relu" in split:
-                ops.append("relu")
-            for op in ops:
+            for op in stage_operator_sequence(layer_plan, split):
                 op_plan = build_op_plan(layer_plan, split, op, intr_moves)
                 asm.extend(operators[op].compile_op(op_plan, memory_plan))
                 asm.append("")

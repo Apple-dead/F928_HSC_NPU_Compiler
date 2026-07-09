@@ -39,6 +39,30 @@ def build_layer_bytes(layer_plan: dict, weight_tensor: dict, raw_weights, raw_bi
     return result
 
 
+def generate_conv_params(layer_plan: dict, tensors: dict, model_params: Path, out_dir: Path) -> None:
+    layer_name = layer_plan["layer"]
+    layer = int(layer_name.removeprefix("layer"))
+    bias_path = model_params / f"layer{layer}_0_bias.txt"
+    raw_biases = parse_numbers(bias_path) if layer_plan.get("has_bias", False) else None
+    units = build_layer_bytes(
+        layer_plan,
+        tensors[f"{layer_name}_weight"],
+        read_weight_txt(model_params / f"layer{layer}_0_weight.txt"),
+        raw_biases,
+    )
+    expected_size = int(tensors[f"{layer_name}_params"]["size_bytes"])
+    if len(units) != expected_size:
+        raise ValueError(f"{layer_name}: generated {len(units)} bytes, expected {expected_size}")
+    output = out_dir / f"{layer_name}_params.coe"
+    write_coe(bytes_to_words(units), output)
+    print(f"[OK] parameter COE generated: {output} ({len(units)} bytes)")
+
+
+PARAMETER_STAGE_BUILDERS = {
+    "conv": generate_conv_params,
+}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate per-layer interleaved weight/bias parameter COEs.")
     parser.add_argument("--memory-plan", type=Path, required=True)
@@ -49,22 +73,11 @@ def main() -> None:
     plan = load_json(args.memory_plan)
     tensors = plan["tensors"]
     for layer_plan in plan.get("execution_plan", []):
-        layer_name = layer_plan["layer"]
-        layer = int(layer_name.removeprefix("layer"))
-        bias_path = args.model_params / f"layer{layer}_0_bias.txt"
-        raw_biases = parse_numbers(bias_path) if layer_plan.get("has_bias", False) else None
-        units = build_layer_bytes(
-            layer_plan,
-            tensors[f"{layer_name}_weight"],
-            read_weight_txt(args.model_params / f"layer{layer}_0_weight.txt"),
-            raw_biases,
-        )
-        expected_size = int(tensors[f"{layer_name}_params"]["size_bytes"])
-        if len(units) != expected_size:
-            raise ValueError(f"{layer_name}: generated {len(units)} bytes, expected {expected_size}")
-        output = args.out_dir / f"{layer_name}_params.coe"
-        write_coe(bytes_to_words(units), output)
-        print(f"[OK] parameter COE generated: {output} ({len(units)} bytes)")
+        op_type = layer_plan.get("op_type", "conv")
+        builder = PARAMETER_STAGE_BUILDERS.get(op_type)
+        if builder is None:
+            continue
+        builder(layer_plan, tensors, args.model_params, args.out_dir)
 
 
 if __name__ == "__main__":
