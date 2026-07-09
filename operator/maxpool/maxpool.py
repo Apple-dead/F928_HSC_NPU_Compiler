@@ -18,14 +18,16 @@ def cfg_addr(reg: str, addr: int) -> List[str]:
 
 
 def encode_rmaxpool(width: int, channels: int) -> int:
-    if channels != 4:
-        raise ValueError(f"maxpool channels per pass must be exactly 4, got {channels}")
+    if not 1 <= channels <= 256:
+        raise ValueError(f"maxpool input channels must be in [1, 256], got {channels}")
+    if channels % 4 != 0:
+        raise ValueError(f"maxpool input channels must be a multiple of 4, got {channels}")
     if width % 8 != 0:
         raise ValueError(f"maxpool width must be divisible by 8, got {width}")
     block_image = width // 8
     if not 1 <= block_image <= 64:
         raise ValueError(f"maxpool block_image must be in [1, 64], got {block_image}")
-    return (block_image - 1) << 26
+    return ((block_image - 1) << 26) | ((channels - 1) << 18)
 
 
 def compile_op(op_plan: Dict[str, Any], memory_plan: Dict[str, Any]) -> List[str]:

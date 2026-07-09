@@ -100,7 +100,7 @@ conv -> dsmp -> relu
 
 其中 DSMP 的输入地址、输出地址、图像尺寸和通道数都来自 `memory_plan.json`。
 
-AVGPOOL/MAXPOOL 作为独立 stage 写入 `execution_plan`，`op_type` 分别为 `avgpool` / `maxpool`。每个 split 固定 4 通道，`generate_instr.py` 会调用对应 operator 生成：
+AVGPOOL/MAXPOOL 作为独立 stage 写入 `execution_plan`，`op_type` 分别为 `avgpool` / `maxpool`。每个池化 stage 由单个 split 覆盖完整输入通道，`generate_instr.py` 会调用对应 operator 生成：
 
 ```asm
 CFG_REGISTER AVGPOOL_P, ...

@@ -111,7 +111,19 @@ MAXPOOL R1, R2
 ```text
 R1 = 池化输入地址
 R2 = 池化输出地址
-AVGPOOL_P / MAXPOOL_P = 输入矩阵边长 / 8
+AVGPOOL_P / MAXPOOL_P = 输入矩阵边长 / 8 + 输入通道数
 ```
 
-池化单次固定处理 4 通道。`generate_memory_plan.py` 会按 4 通道拆分，确保多次池化的输出在内存中紧密排列。
+池化指令由编译器配置输入通道数，NPU根据该通道数一次处理完整输入通道，不再由编译器按4通道拆分。输入 storage channels 仍必须是4的倍数，否则 `generate_memory_plan.py` 会报错。
+
+当前AVGPOOL/MAXPOOL指令语义固定为2x2池化窗口、stride=2、padding=0。编译器仅接受：
+
+```text
+kernel_size = [2, 2]
+stride      = [2, 2]
+padding     = [0, 0]
+dilation    = [1, 1]
+ceil_mode   = False
+```
+
+其他池化配置会在 memory plan 阶段报错。

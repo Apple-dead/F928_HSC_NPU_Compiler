@@ -128,8 +128,8 @@ def instr_count_for_execution_plan(execution_plan: List[Dict[str, Any]]) -> int:
                 total += 6
             if "relu" in split:
                 total += 7
-            if "pool" in split:
-                total += 6
+        if "pool" in split:
+            total += 6
     return total
 
 
@@ -170,23 +170,6 @@ def pool_output_hw(height: int, width: int, pool: Dict[str, Any]) -> tuple[int, 
     if out_h <= 0 or out_w <= 0:
         raise ValueError(f"invalid pool output size for pool={pool}, input={height}x{width}")
     return out_h, out_w
-
-
-def npu_pool_channel_groups(channels: int) -> List[Dict[str, Any]]:
-    if channels % 4 != 0:
-        raise ValueError(f"pool input storage channels must be a multiple of 4, got {channels}")
-    groups: List[Dict[str, Any]] = []
-    for start in range(0, channels, 4):
-        groups.append(
-            {
-                "group_index": len(groups),
-                "start_channel": start,
-                "channels": 4,
-                "valid_channels": 4,
-                "has_padding": False,
-            }
-        )
-    return groups
 
 
 def addr_to_int(addr: str) -> int:
@@ -401,35 +384,37 @@ def build_pool_execution_plan(
     if input_channels % 4 != 0:
         raise ValueError(f"{layer_name}: pool input storage channels must be a multiple of 4, got {input_channels}")
 
-    bytes_per_input_channel = input_h * input_w
-    bytes_per_output_channel = output_storage_h * output_storage_w
-    splits: List[Dict[str, Any]] = []
-    for group in npu_pool_channel_groups(input_channels):
-        start_channel = group["start_channel"]
-        input_offset = start_channel * bytes_per_input_channel
-        output_offset = start_channel * bytes_per_output_channel
-        item = dict(group)
-        item["offsets_bytes"] = {
-            "input": input_offset,
-            "output": output_offset,
+    input_size = input_channels * input_h * input_w
+    output_size = input_channels * output_storage_h * output_storage_w
+    splits: List[Dict[str, Any]] = [
+        {
+            "group_index": 0,
+            "start_channel": 0,
+            "channels": input_channels,
+            "valid_channels": input_channels,
+            "has_padding": False,
+            "offsets_bytes": {
+                "input": 0,
+                "output": 0,
+            },
+            "size_bytes": {
+                "input": input_size,
+                "output": output_size,
+            },
+            "pool": {
+                "input_addr": input_tensor["addr"],
+                "output_addr": output_tensor["addr"],
+                "feature_size": input_w,
+                "channels": input_channels,
+            },
         }
-        item["size_bytes"] = {
-            "input": group["channels"] * bytes_per_input_channel,
-            "output": group["channels"] * bytes_per_output_channel,
-        }
-        item["pool"] = {
-            "input_addr": hex_addr(addr_to_int(input_tensor["addr"]) + input_offset),
-            "output_addr": hex_addr(addr_to_int(output_tensor["addr"]) + output_offset),
-            "feature_size": input_w,
-            "channels": group["channels"],
-        }
-        splits.append(item)
+    ]
 
     return {
         "op_type": op_name,
         "layer": layer_name,
         "channel_alignment": 4,
-        "pool_channel_unit": 4,
+        "pool_channel_unit": "all_input_channels",
         "input_channels": input_channels,
         "output_channels": input_channels,
         "aligned_input_channels": input_channels,
