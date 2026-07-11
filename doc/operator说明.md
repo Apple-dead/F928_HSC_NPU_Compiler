@@ -127,3 +127,30 @@ ceil_mode   = False
 ```
 
 其他池化配置会在 memory plan 阶段报错。
+
+## 8. FULL
+
+`operator/full/full.py` 负责生成全连接指令片段：
+
+```asm
+CFG_REGISTER R1, LOW,  ...
+CFG_REGISTER R1, HIGH, ...
+CFG_REGISTER R2, LOW,  ...
+CFG_REGISTER R2, HIGH, ...
+CFG_REGISTER R3, LOW,  ...
+CFG_REGISTER R3, HIGH, ...
+CFG_REGISTER FULL_P_1, ...
+CFG_REGISTER FULL_P_2, ...
+FULL R1, R2, R3
+```
+
+其中：
+
+```text
+R1 = 上一层输出数据起始地址
+R2 = 当前全连接输出元素写回地址
+R3 = 当前输出元素对应的权重起始地址
+RFULL = input_words + start_position + condition_bias
+```
+
+一个 FULL operator 只计算一个输出元素。`generate_instr.py` 会为 linear stage 的每个输出元素调用一次 FULL operator。

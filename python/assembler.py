@@ -25,6 +25,8 @@ SPECIAL_REGISTER_CODE = {
     "MADD_P": 0x09,
     "AVGPOOL_P": 0x0C,
     "MAXPOOL_P": 0x0E,
+    "FULL_P_1": 0x10,
+    "FULL_P_2": 0x11,
 }
 
 COMPUTE_OPCODE = {
@@ -34,6 +36,7 @@ COMPUTE_OPCODE = {
     "MADD": 0b000111,
     "AVGPOOL": 0b001000,
     "MAXPOOL": 0b001001,
+    "FULL": 0b001010,
 }
 
 COMPUTE_OPERAND_COUNT = {
@@ -43,6 +46,7 @@ COMPUTE_OPERAND_COUNT = {
     "MADD": 3,
     "AVGPOOL": 2,
     "MAXPOOL": 2,
+    "FULL": 3,
 }
 
 

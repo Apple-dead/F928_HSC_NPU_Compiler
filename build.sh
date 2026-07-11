@@ -22,6 +22,7 @@ clean() {
     ./data/instr.asm \
     ./data/instr.txt \
     ./coe/layer*_params.coe \
+    ./coe/linear*_params.coe \
     ./coe/instr.coe \
     ./target/all.coe \
     ./target/all.coe.map.txt

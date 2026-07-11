@@ -33,7 +33,6 @@ aten.conv2d.default        -> conv2d
 aten.relu.default          -> relu
 aten.leaky_relu.default    -> relu
 aten.avg_pool2d.default    -> avgpool2d
-aten.flatten.using_ints    -> flatten
 aten.linear.default        -> linear
 ```
 
@@ -43,6 +42,7 @@ aten.linear.default        -> linear
 aten.clamp.default
 aten.to.dtype
 aten.floor.default
+aten.flatten.using_ints
 ```
 
 `aten.leaky_relu.default` 会写成 IR 的 `relu`，并记录 `negative_slope` 和 `tan`。
@@ -53,7 +53,13 @@ aten.floor.default
 conv2d -> relu -> avgpool2d -> flatten -> linear
 ```
 
-即使后端暂不支持 `avgpool2d`、`flatten`、`linear`，前端也必须把它们完整写入 IR，后续 `generate_memory_plan.py` 再负责明确报错。
+当前前端会忽略 `flatten`，实际写入 IR 的有效 op 为：
+
+```text
+conv2d -> relu -> avgpool2d -> linear
+```
+
+`flatten` 不占用 `INFER_PARSE_OP_LIMIT` 名额，也不会出现在 `model_ir.json` 中；后端的 FULL 算子直接按上一层 NPU 输出的物理数据布局读取输入。
 
 ## 3. 解析范围控制
 
@@ -76,6 +82,8 @@ INFER_PARSE_MODE = 2  只导出前 INFER_PARSE_OP_LIMIT 个可执行 op
 ```text
 conv2d -> relu -> avgpool2d -> flatten -> linear
 ```
+
+这里的 `flatten` 是透传节点，不计入有效 op 数量。例如 `conv2d -> relu -> flatten -> linear` 在 `INFER_PARSE_OP_LIMIT = 3` 时会导出到 `linear`。
 
 当 `INFER_PARSE_MODE = 2` 且 `INFER_PARSE_OP_LIMIT = 1` 时，导出的 IR 只包含：
 

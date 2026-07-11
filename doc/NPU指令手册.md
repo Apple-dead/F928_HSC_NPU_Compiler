@@ -419,3 +419,44 @@ ReLU配置寄存器（RRELU）
 | 6 bit | 8 bit | 18 bit |
 | blockedimage | Input_channel | reserve |
 | 每个矩阵的尺寸（实际边长/8）000000→1 000001→2 … 111111→64 | 输入通道数 00000000→1 00000001→2 … 11111111→256 | 预留 |
+
+## 全连接（FULL）补充
+
+### 全连接配置寄存器（RFULL）
+
+| [31:16] | [15:11] | [10] | [9:0] |
+| --- | --- | --- | --- |
+| 16 bit | 5 bit | 1 bit | 10 bit |
+| Words number | start_position | condition_bias | reserve |
+| 全连接输入字数，编码值 0 表示 1 字，65535 表示 65536 字 | 截位起始比特位，0 到 31 | 0 表示无 bias，1 表示有 bias | 预留 |
+
+这里 1 字 = 4 byte。编译器按上一层输出的物理存储 footprint 计算 FULL 输入字数，即 `aligned_channels * storage_height * storage_width / 4`。
+
+### RFULL 配置指令
+
+| [31:26] | [25:21] | [20:16] | [15:0] |
+| --- | --- | --- | --- |
+| opcode | rd | subop | Imm16 |
+| 000001→CFG | 00000→专用寄存器 | 10000→RFULL 低 16 位；10001→RFULL 高 16 位 | RFULL 对应半字 |
+
+汇编表示：
+
+```asm
+CFG_REGISTER FULL_P_1, 0x....
+CFG_REGISTER FULL_P_2, 0x....
+```
+
+### FULL 计算指令
+
+| [31:26] | [25:21] | [20:16] | [15:11] | [10:8] | [7:0] |
+| --- | --- | --- | --- | --- | --- |
+| opcode | rs0 | rs1 | rs2 | dtype | reserve |
+| 001010→FULL | 输入数据起始地址寄存器 | 输出数据写回地址寄存器 | 全连接权重起始地址寄存器 | 000→INT8 | 全部置 0 |
+
+示例：
+
+```asm
+FULL R1, R2, R3
+```
+
+一个 FULL 指令只计算一个全连接输出元素。若全连接有 10 个输出，则编译器生成 10 次 FULL：输入地址保持不变，权重起始地址按每个输出的参数块递增，输出地址按 signed int8 结果逐 byte 紧密递增。

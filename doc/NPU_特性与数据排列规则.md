@@ -145,3 +145,40 @@ instr
 target/all.coe
 target/all.coe.map.txt
 ```
+
+## 10. Linear / FULL 参数与输出布局
+
+前端仍按 PyTorch 逻辑布局导出全连接参数：
+
+```text
+linear weight: [out_features, in_features]
+linear bias  : [out_features]，仅有 bias 时生成，int32
+```
+
+`flatten` 不写入 IR 和 memory plan。FULL 直接读取上一层 NPU 输出的物理存储数据。编译器在生成 `linearN_params.coe` 时，把每个输出神经元的权重重排为上一层输出的物理 footprint：
+
+```text
+out0 padded/interleaved weights
+out0 bias (optional int32)
+out1 padded/interleaved weights
+out1 bias (optional int32)
+...
+```
+
+单个输出的权重先扩展到：
+
+```text
+[aligned_input_channels, input_storage_height, input_storage_width]
+```
+
+其中逻辑通道不足 4 的倍数时补 0 通道；逻辑 H/W 小于 storage H/W 时，padded 行列也补 0。写入顺序为每 4 通道一组，组内按同一空间位置交织：
+
+```text
+group0 row0 col0 ch0, ch1, ch2, ch3
+group0 row0 col1 ch0, ch1, ch2, ch3
+...
+group1 row0 col0 ch4, ch5, ch6, ch7
+...
+```
+
+FULL 输出是 signed int8，`linearN_out` runtime 区按 byte 紧密排列：第 0 个输出在 base，第 1 个输出在 base+1，以此类推。

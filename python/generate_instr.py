@@ -25,6 +25,7 @@ OPERATOR_PATHS = {
     "relu": PROJECT_ROOT / "operator" / "relu" / "relu.py",
     "avgpool": PROJECT_ROOT / "operator" / "avgpool" / "avgpool.py",
     "maxpool": PROJECT_ROOT / "operator" / "maxpool" / "maxpool.py",
+    "full": PROJECT_ROOT / "operator" / "full" / "full.py",
 }
 
 
@@ -78,11 +79,15 @@ def move_to_start_position(move: int | float, *, conv_index: int, op: str) -> in
 
 def load_intr_moves(path: Path) -> Dict[str, Dict[int, int]]:
     data = read_json(path)
-    field = "CONV_MOVE_BY_INDEX"
-    raw = data.get(field)
-    if not isinstance(raw, dict):
-        raise ValueError(f"{path} must contain object field {field}")
-    return {field: {int(index): int(move) for index, move in raw.items()}}
+    result: Dict[str, Dict[int, int]] = {}
+    for field in ("CONV_MOVE_BY_INDEX", "FULL_MOVE_BY_INDEX"):
+        raw = data.get(field, {})
+        if raw is None:
+            raw = {}
+        if not isinstance(raw, dict):
+            raise ValueError(f"{path} field {field} must be an object when present")
+        result[field] = {int(index): int(move) for index, move in raw.items()}
+    return result
 
 
 def get_start_position(intr_moves: Dict[str, Dict[int, int]], field: str, conv_index: int, op: str) -> int:
@@ -163,12 +168,33 @@ def build_pool_op_plan(
     return common
 
 
+def build_full_op_plan(
+    layer_plan: Dict[str, Any],
+    split: Dict[str, Any],
+    common: Dict[str, Any],
+    intr_moves: Dict[str, Dict[int, int]],
+) -> Dict[str, Any]:
+    linear_index = int(layer_plan["linear_index"])
+    common.update(
+        split["full"]
+        | {
+            "linear_index": linear_index,
+            "output_index": int(split["output_index"]),
+            "input_words": int(layer_plan["input_words"]),
+            "has_bias": bool(split["full"].get("has_bias", False)),
+            "start_position": get_start_position(intr_moves, "FULL_MOVE_BY_INDEX", linear_index, "full"),
+        }
+    )
+    return common
+
+
 OP_PLAN_BUILDERS = {
     "conv": build_conv_op_plan,
     "dsmp": build_dsmp_op_plan,
     "relu": build_relu_op_plan,
     "avgpool": build_pool_op_plan,
     "maxpool": build_pool_op_plan,
+    "full": build_full_op_plan,
 }
 
 
@@ -196,6 +222,8 @@ def stage_operator_sequence(layer_plan: Dict[str, Any], split: Dict[str, Any]) -
         return ops
     if op_type in SINGLE_OPERATOR_STAGES:
         return SINGLE_OPERATOR_STAGES[op_type]
+    if op_type == "linear":
+        return ["full"]
     raise ValueError(f"unsupported execution plan op_type: {op_type}")
 
 

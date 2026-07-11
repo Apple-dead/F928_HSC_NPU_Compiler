@@ -62,6 +62,7 @@ if exist ".\data\memory_plan.json" del /q ".\data\memory_plan.json"
 if exist ".\data\instr.asm" del /q ".\data\instr.asm"
 if exist ".\data\instr.txt" del /q ".\data\instr.txt"
 del /q ".\coe\layer*_params.coe" 2>nul
+del /q ".\coe\linear*_params.coe" 2>nul
 if exist ".\coe\instr.coe" del /q ".\coe\instr.coe"
 if exist ".\target\all.coe" del /q ".\target\all.coe"
 if exist ".\target\all.coe.map.txt" del /q ".\target\all.coe.map.txt"

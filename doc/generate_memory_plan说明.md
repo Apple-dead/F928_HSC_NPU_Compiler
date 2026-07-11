@@ -22,7 +22,7 @@ IMAGE_PATH 指向的输入 COE
 python ./python/generate_memory_plan.py --model-ir ./data/model_ir.json --out ./data/memory_plan.json
 ```
 
-该脚本负责把 IR 中后端可支持的 `conv2d/relu` 路径转换为 NPU 地址规划、参数区规划和分组执行计划。
+该脚本负责把 IR 中后端可支持的 `conv2d/relu/avgpool2d/maxpool2d/linear` 路径转换为 NPU 地址规划、参数区规划和分组执行计划。
 
 ## 2. 后端支持范围
 
@@ -31,12 +31,15 @@ python ./python/generate_memory_plan.py --model-ir ./data/model_ir.json --out ./
 ```text
 conv2d
 relu
+avgpool2d
+maxpool2d
+linear
 ```
 
-如果 IR 中出现暂不支持的 op，会直接报错，不会静默跳过。例如：
+如果 IR 中出现暂不支持的 op，会直接报错，不会静默跳过。`flatten` 不属于后端 op，已在前端透传忽略。
 
 ```text
-Unsupported op flatten at op id 3. Current backend only supports conv2d/relu/avgpool2d/maxpool2d path.
+Unsupported op xxx at op id N.
 ```
 
 ## 3. 主要配置
@@ -211,3 +214,25 @@ generate_instr.py 只生成 CONV 和 END
 - `stride=1` 规划为 `conv -> relu`。
 - `stride=2,padding=0` 规划为 `conv(stride=1) -> dsmp -> relu`。
 - `stride>2` 或 `stride=2,padding!=0` 会报错。
+
+## 追加：Linear / FULL 规划规则
+
+当前 memory plan 支持 `linear`，并将其规划为 `op_type = "linear"` 的 execution stage。`flatten` 已在前端透传，不会进入 `model_ir.json` 和 `memory_plan.json`。
+
+规划时会读取上一层输出的逻辑 shape 与物理 storage shape：
+
+```text
+逻辑输入特征数 = channels * height * width
+FULL 输入字节数 = aligned_channels * storage_height * storage_width
+FULL 输入字数 = FULL 输入字节数 / 4
+```
+
+`linear.in_features` 必须等于逻辑输入特征数；若不一致，memory plan 阶段报错。参数区大小按物理 storage footprint 计算：
+
+```text
+linearN_params.size = out_features * (FULL 输入字节数 + optional int32 bias)
+```
+
+每个输出元素对应一个 split 和一条 FULL 指令。split 中输入地址保持为上一层输出 tensor 的基址；权重地址按 `bytes_per_output` 递增；输出地址按 byte 递增，因此 `linearN_out` 是 signed int8 紧密排列。
+
+当上一层逻辑通道数不是 4 的倍数时，编译器不会报错，而是在全连接权重的 padded channel 位置补 0。例如上一层输出为 1 通道时，FULL 参数布局按 4 通道处理，额外 3 个通道的权重矩阵全为 0。

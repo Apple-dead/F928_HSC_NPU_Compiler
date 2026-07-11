@@ -135,3 +135,19 @@ generated_instruction_bytes == memory_plan["tensors"]["instr"]["size_bytes"]
 ```
 
 如果不一致，说明 memory plan 中的指令空间估计和实际生成的指令数量不一致，需要修正规划或生成逻辑。
+
+## 7. FULL 指令生成
+
+`linear` stage 会展开为多条 `FULL` 指令：`out_features` 有多少个输出，就生成多少次 FULL。每次 FULL 只计算一个 signed int8 输出元素。
+
+`generate_instr.py` 从 `intr_move.json` 的 `FULL_MOVE_BY_INDEX` 读取截位 move，编号是当前 IR 中第 N 个 linear，从 1 开始：
+
+```json
+{
+  "FULL_MOVE_BY_INDEX": {
+    "1": 512
+  }
+}
+```
+
+生成指令时，同一个 linear 的所有输出共用输入地址和 `input_words`；权重地址按每个输出的参数块递增；输出地址按 byte 递增。

@@ -121,6 +121,9 @@ def channel_group_max_channels(
 def instr_count_for_execution_plan(execution_plan: List[Dict[str, Any]]) -> int:
     total = 1
     for stage in execution_plan:
+        if stage.get("op_type") == "linear":
+            total += 9 * int(stage.get("output_features", 0))
+            continue
         for split in stage.get("splits", []):
             if "conv" in split:
                 total += 9
@@ -128,8 +131,8 @@ def instr_count_for_execution_plan(execution_plan: List[Dict[str, Any]]) -> int:
                 total += 6
             if "relu" in split:
                 total += 7
-        if "pool" in split:
-            total += 6
+            if "pool" in split:
+                total += 6
     return total
 
 
@@ -514,10 +517,31 @@ def parse_pool_unit(ops: List[Dict[str, Any]], index: int, units: List[Dict[str,
     )
 
 
+def parse_linear_unit(ops: List[Dict[str, Any]], index: int, units: List[Dict[str, Any]]) -> tuple[Dict[str, Any], int]:
+    op = ops[index]
+    linear_index = len([unit for unit in units if unit["op_type"] == "linear"]) + 1
+    return (
+        {
+            "op_type": "linear",
+            "linear_index": linear_index,
+            "layer": f"linear{linear_index}",
+            "input": op.get("input"),
+            "output": op.get("output"),
+            "weight_file": op.get("weight_file"),
+            "bias_file": op.get("bias_file"),
+            "has_bias": bool(op.get("has_bias", False)),
+            "in_features": int(op["in_features"]),
+            "out_features": int(op["out_features"]),
+        },
+        index + 1,
+    )
+
+
 UNIT_PARSERS = {
     "conv2d": parse_conv_unit,
     "avgpool2d": parse_pool_unit,
     "maxpool2d": parse_pool_unit,
+    "linear": parse_linear_unit,
 }
 
 
@@ -665,8 +689,10 @@ def plan_pool_unit(
     layer_name = unit["layer"]
     _, input_tensor_name, input_shape = require_input_value(unit, value_tensors, value_shapes)
     input_tensor_info = plan["tensors"][input_tensor_name]
-    pool_input_h = int(input_shape["storage_height"])
-    pool_input_w = int(input_shape["storage_width"])
+    pool_input_h = int(input_shape["height"])
+    pool_input_w = int(input_shape["width"])
+    pool_input_storage_h = int(input_shape["storage_height"])
+    pool_input_storage_w = int(input_shape["storage_width"])
     pool_channels = int(input_shape["aligned_channels"])
     pool_out_h, pool_out_w = pool_output_hw(pool_input_h, pool_input_w, unit["pool"])
     pool_storage_h, pool_storage_w = runtime_storage_hw(pool_out_h, pool_out_w)
@@ -688,8 +714,8 @@ def plan_pool_unit(
             op_name=unit["op_type"],
             layer_name=layer_name,
             input_channels=pool_channels,
-            input_h=pool_input_h,
-            input_w=pool_input_w,
+            input_h=pool_input_storage_h,
+            input_w=pool_input_storage_w,
             output_h=pool_out_h,
             output_w=pool_out_w,
             output_storage_h=pool_storage_h,
@@ -704,12 +730,173 @@ def plan_pool_unit(
         value_shapes,
         unit.get("output"),
         tensor_name,
-        height=pool_storage_h,
-        width=pool_storage_w,
+        height=pool_out_h,
+        width=pool_out_w,
         storage_height=pool_storage_h,
         storage_width=pool_storage_w,
         channels=pool_channels,
         aligned_channels=pool_channels,
+    )
+
+
+def plan_linear_unit(
+    plan: Dict[str, Any],
+    unit: Dict[str, Any],
+    value_tensors: Dict[str, str],
+    value_shapes: Dict[str, Dict[str, int]],
+) -> None:
+    layer_name = unit["layer"]
+    linear_index = int(unit["linear_index"])
+    _, input_tensor_name, input_shape = require_input_value(unit, value_tensors, value_shapes)
+    input_tensor = plan["tensors"][input_tensor_name]
+
+    input_h = int(input_shape["height"])
+    input_w = int(input_shape["width"])
+    input_ch = int(input_shape["channels"])
+    aligned_input_ch = int(input_shape["aligned_channels"])
+    input_storage_h = int(input_shape["storage_height"])
+    input_storage_w = int(input_shape["storage_width"])
+    in_features = int(unit["in_features"])
+    out_features = int(unit["out_features"])
+    expected_in_features = input_ch * input_h * input_w
+    if in_features != expected_in_features:
+        raise ValueError(
+            f"{layer_name}: linear in_features={in_features} does not match previous output "
+            f"{input_ch}x{input_h}x{input_w}={expected_in_features}"
+        )
+
+    input_storage_bytes = aligned_input_ch * input_storage_h * input_storage_w
+    if input_storage_bytes % 4 != 0:
+        raise ValueError(f"{layer_name}: FULL input byte count must be divisible by 4, got {input_storage_bytes}")
+    input_words = input_storage_bytes // 4
+    if not 1 <= input_words <= 65536:
+        raise ValueError(f"{layer_name}: FULL input words must be in [1, 65536], got {input_words}")
+
+    has_bias = bool(unit.get("has_bias", False))
+    bias_bytes_per_output = 4 if has_bias else 0
+    bytes_per_output_params = input_storage_bytes + bias_bytes_per_output
+    parameter_size = out_features * bytes_per_output_params
+    output_size = out_features
+
+    params = add_init_region(plan, f"{layer_name}_params", parameter_size, f"coe/{layer_name}_params.coe")
+    output_tensor = add_runtime_region(
+        plan,
+        f"{layer_name}_out",
+        output_size,
+        channels=out_features,
+        aligned_channels=out_features,
+        shape=[out_features],
+        storage_shape=[out_features],
+        layout="signed_int8_linear_outputs_tightly_packed",
+    )
+
+    plan["tensors"][f"{layer_name}_weight"] = {
+        "addr": params["addr"],
+        "shape_oi": [out_features, in_features],
+        "input_shape_nchw": [1, input_ch, input_h, input_w],
+        "input_storage_shape_nchw": [1, aligned_input_ch, input_storage_h, input_storage_w],
+        "size_bytes": out_features * input_storage_bytes,
+        "parameter_region": f"{layer_name}_params",
+        "layout": "per_output_4channel_pixel_interleaved_with_zero_padding",
+    }
+    if has_bias:
+        plan["tensors"][f"{layer_name}_bias"] = {
+            "addr": params["addr"],
+            "channels": out_features,
+            "shape": [out_features],
+            "storage_shape": [out_features],
+            "size_bytes": out_features * 4,
+            "parameter_region": f"{layer_name}_params",
+            "layout": "int32_bias_after_each_linear_output_weight_block",
+        }
+    plan["tensors"][f"{layer_name}_params"] = {
+        "addr": params["addr"],
+        "size_bytes": parameter_size,
+        "has_bias": has_bias,
+        "bytes_per_output": bytes_per_output_params,
+        "layout": (
+            "per_output_padded_weight_then_int32_bias"
+            if has_bias
+            else "per_output_padded_weight"
+        ),
+    }
+    plan["tensors"][f"{layer_name}_out"] = output_tensor
+
+    splits: List[Dict[str, Any]] = []
+    param_base = addr_to_int(params["addr"])
+    output_base = addr_to_int(output_tensor["addr"])
+    for output_index in range(out_features):
+        param_offset = output_index * bytes_per_output_params
+        output_offset = output_index
+        splits.append(
+            {
+                "group_index": output_index,
+                "output_index": output_index,
+                "start_channel": 0,
+                "channels": aligned_input_ch,
+                "valid_channels": input_ch,
+                "has_padding": aligned_input_ch != input_ch
+                or input_storage_h != input_h
+                or input_storage_w != input_w,
+                "offsets_bytes": {
+                    "weight": param_offset,
+                    "bias": param_offset + input_storage_bytes if has_bias else None,
+                    "output": output_offset,
+                },
+                "size_bytes": {
+                    "weight": input_storage_bytes,
+                    "bias": bias_bytes_per_output,
+                    "output": 1,
+                },
+                "full": {
+                    "input_addr": input_tensor["addr"],
+                    "output_addr": hex_addr(output_base + output_offset),
+                    "weight_addr": hex_addr(param_base + param_offset),
+                    "has_bias": has_bias,
+                },
+            }
+        )
+
+    plan["execution_plan"].append(
+        {
+            "op_type": "linear",
+            "linear_index": linear_index,
+            "layer": layer_name,
+            "input": unit.get("input"),
+            "output": unit.get("output"),
+            "input_tensor": input_tensor_name,
+            "output_tensor": f"{layer_name}_out",
+            "input_features": in_features,
+            "output_features": out_features,
+            "input_channels": input_ch,
+            "aligned_input_channels": aligned_input_ch,
+            "input_hw": [input_h, input_w],
+            "input_storage_hw": [input_storage_h, input_storage_w],
+            "input_storage_bytes": input_storage_bytes,
+            "input_words": input_words,
+            "has_bias": has_bias,
+            "output_layout": "signed_int8_tightly_packed",
+            "reserved_regions": {
+                "linear_out": {
+                    "addr": output_tensor["addr"],
+                    "size_bytes": output_tensor["size_bytes"],
+                    "layout": "signed_int8_tightly_packed",
+                },
+            },
+            "splits": splits,
+        }
+    )
+    register_value(
+        value_tensors,
+        value_shapes,
+        unit.get("output"),
+        f"{layer_name}_out",
+        height=1,
+        width=out_features,
+        storage_height=1,
+        storage_width=out_features,
+        channels=1,
+        aligned_channels=1,
     )
 
 
@@ -846,8 +1033,8 @@ def plan_conv_unit(
             value_shapes,
             unit.get("relu_output"),
             output_tensor_name,
-            height=output_storage_h,
-            width=output_storage_w,
+            height=out_h,
+            width=out_w,
             storage_height=output_storage_h,
             storage_width=output_storage_w,
             channels=out_ch,
@@ -863,8 +1050,8 @@ def plan_conv_unit(
         value_shapes,
         unit.get("output"),
         output_tensor_name,
-        height=output_storage_h,
-        width=output_storage_w,
+        height=out_h,
+        width=out_w,
         storage_height=output_storage_h,
         storage_width=output_storage_w,
         channels=out_ch,
@@ -876,6 +1063,7 @@ UNIT_PLANNERS = {
     "conv": plan_conv_unit,
     "avgpool": plan_pool_unit,
     "maxpool": plan_pool_unit,
+    "linear": plan_linear_unit,
 }
 
 
