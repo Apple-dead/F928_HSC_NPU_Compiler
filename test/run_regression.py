@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from basic_runner import run_basic_tests
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TEST_ROOT = PROJECT_ROOT / "test"
@@ -17,7 +19,7 @@ ERROR_DIR = TEST_ROOT / "error"
 PYTHON_CONFIG = PROJECT_ROOT / "python" / "npu_config.py"
 TARGET_COE = PROJECT_ROOT / "target" / "all.coe"
 DIFF_TOOL = TEST_ROOT / "tools" / "diff.py"
-IGNORED_DIRS = {"tools", "error", "__pycache__"}
+IGNORED_DIRS = {"basic", "tools", "error", "__pycache__"}
 REQUIRED_FILES = ("model.pt2", "npu_config.py", "intr_move.json", "all.coe")
 
 
@@ -208,6 +210,22 @@ def main() -> int:
     results: list[TestResult] = []
 
     try:
+        print("[BASIC] run basic compiler invariant tests")
+        basic_results = run_basic_tests(args.os, base_config=original_config)
+        for result in basic_results:
+            if result.passed:
+                print(f"[PASS] {result.name}")
+            else:
+                print(f"[FAIL] {result.name}: {result.message}")
+                if result.log_path is not None:
+                    print(f"       log: {result.log_path}")
+                print(
+                    f"[SUMMARY] basic_passed={sum(1 for item in basic_results if item.passed)} "
+                    f"basic_failed=1 model_passed=0 model_failed=0"
+                )
+                return 1
+
+        print("[MODEL] run golden model fixtures")
         for fixture in fixtures:
             print(f"[RUN] {fixture.name}")
             result = run_fixture(fixture, args.os)
@@ -218,6 +236,11 @@ def main() -> int:
                 print(f"[FAIL] {result.name}: {result.message}")
                 if result.log_path is not None:
                     print(f"       log: {result.log_path}")
+                print(
+                    f"[SUMMARY] basic_passed={len(basic_results)} basic_failed=0 "
+                    f"model_passed={sum(1 for item in results if item.passed)} model_failed=1"
+                )
+                return 1
     finally:
         restore_config(original_config)
         final_clean = run_command(build_command(args.os, "clean"))
@@ -231,7 +254,7 @@ def main() -> int:
 
     passed = sum(1 for result in results if result.passed)
     failed = len(results) - passed
-    print(f"[SUMMARY] passed={passed} failed={failed} total={len(results)}")
+    print(f"[SUMMARY] basic_passed={len(basic_results)} basic_failed=0 model_passed={passed} model_failed={failed}")
     return 0 if failed == 0 else 1
 
 
