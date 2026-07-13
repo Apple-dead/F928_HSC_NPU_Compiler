@@ -17,14 +17,12 @@ def cfg_addr(reg: str, addr: int) -> List[str]:
     ]
 
 
-def encode_rdsmp(image_size: int, channels: int) -> int:
-    if not 1 <= image_size <= 1024:
-        raise ValueError(f"dsmp image_size must be in [1, 1024], got {image_size}")
-    if image_size % 8 != 0:
-        raise ValueError(f"dsmp image_size must be divisible by 8, got {image_size}")
-    if not 1 <= channels <= 8:
-        raise ValueError(f"dsmp channels per pass must be <= 8, got {channels}")
-    return ((image_size - 1) << 22) | ((channels - 1) << 17)
+def encode_rdsmp(block_image: int, channels: int) -> int:
+    if not 1 <= block_image <= 64:
+        raise ValueError(f"dsmp block_image must be in [1, 64], got {block_image}")
+    if not 1 <= channels <= 32:
+        raise ValueError(f"dsmp channels must be in [1, 32], got {channels}")
+    return ((block_image - 1) << 26) | ((channels - 1) << 21)
 
 
 def compile_op(op_plan: Dict[str, Any], memory_plan: Dict[str, Any]) -> List[str]:
@@ -33,7 +31,14 @@ def compile_op(op_plan: Dict[str, Any], memory_plan: Dict[str, Any]) -> List[str
 
     input_addr = parse_addr(op_plan["input_addr"])
     output_addr = parse_addr(op_plan["output_addr"])
-    rdsmp = encode_rdsmp(image_size=int(op_plan["image_size"]), channels=int(op_plan["channels"]))
+    if "block_image" in op_plan:
+        block_image = int(op_plan["block_image"])
+    else:
+        image_size = int(op_plan["image_size"])
+        if image_size % 8 != 0:
+            raise ValueError(f"dsmp image_size must be divisible by 8, got {image_size}")
+        block_image = image_size // 8
+    rdsmp = encode_rdsmp(block_image=block_image, channels=int(op_plan["channels"]))
     dsmp_high16 = (rdsmp >> 16) & 0xFFFF
 
     asm: List[str] = [

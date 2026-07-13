@@ -90,10 +90,10 @@ DSMP R1, R2
 ```text
 R1 = 下采样输入地址
 R2 = 下采样输出地址
-DSMP_P = 图像尺寸 + 通道数
+DSMP_P = 下采样输入矩阵边长 / 8 + 通道数
 ```
 
-DSMP 当前同样按每次最多 8 通道处理。
+RDSMP 的通道字段支持 1 到 32 通道。当前 conv -> dsmp 编译路径仍沿用 conv 的 channel group，因此通常按每次最多 8 个输出通道生成一条 DSMP。输入矩阵边长使用物理存储边长；若上一层逻辑输出不是 8 的倍数，NPU 会把输出补零到 8 的倍数，编译器也按补零后的边长配置 `blockedimage`。
 
 ## 7. AVGPOOL / MAXPOOL
 

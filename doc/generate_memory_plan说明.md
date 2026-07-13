@@ -213,6 +213,7 @@ generate_instr.py 只生成 CONV 和 END
 - 输入和运行时 feature map 最小按 `8x8` 预留，且 H/W 按 8 对齐。
 - `stride=1` 规划为 `conv -> relu`。
 - `stride=2,padding=0` 规划为 `conv(stride=1) -> dsmp -> relu`。
+- DSMP 的 `block_image` 按下采样输入的物理存储边长计算，即 `conv_output_hw / 8`；如果上一层逻辑输出边长不是 8 的倍数，先按 NPU 写回规则补零到 8 的倍数再配置。
 - `stride>2` 或 `stride=2,padding!=0` 会报错。
 
 ## 追加：Linear / FULL 规划规则

@@ -283,10 +283,13 @@ def build_layer_execution_plan(
         }
         item["bias_addr"] = hex_addr(addr_to_int(weight_tensor["addr"]) + bias_offset) if has_bias else None
         if has_dsmp:
+            if conv_storage_h != conv_storage_w:
+                raise ValueError(f"{layer_name}: dsmp input storage HW must be square, got {conv_storage_h}x{conv_storage_w}")
             item["dsmp"] = {
                 "input_addr": hex_addr(addr_to_int(conv_out_tensor["addr"]) + conv_feature_offset),
                 "output_addr": hex_addr(addr_to_int(dsmp_out_tensor["addr"]) + feature_offset),
-                "image_size": conv_storage_h,
+                "input_storage_hw": [conv_storage_h, conv_storage_w],
+                "block_image": conv_storage_h // 8,
                 "channels": group["valid_channels"],
             }
             relu_input_addr = hex_addr(addr_to_int(dsmp_out_tensor["addr"]) + feature_offset)
