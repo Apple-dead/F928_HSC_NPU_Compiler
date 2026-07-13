@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 from __future__ import annotations
@@ -124,13 +124,16 @@ def instr_count_for_execution_plan(execution_plan: List[Dict[str, Any]]) -> int:
         if stage.get("op_type") == "linear":
             total += 9 * int(stage.get("output_features", 0))
             continue
-        for split in stage.get("splits", []):
-            if "conv" in split:
-                total += 9
-            if "dsmp" in split:
+        if stage.get("op_type", "conv") == "conv":
+            for split in stage.get("splits", []):
+                if "conv" in split:
+                    total += 9
+            if "dsmp" in stage:
                 total += 6
-            if "relu" in split:
+            if "relu" in stage:
                 total += 7
+            continue
+        for split in stage.get("splits", []):
             if "pool" in split:
                 total += 6
     return total
@@ -282,24 +285,7 @@ def build_layer_execution_plan(
             "has_bias": has_bias,
         }
         item["bias_addr"] = hex_addr(addr_to_int(weight_tensor["addr"]) + bias_offset) if has_bias else None
-        if has_dsmp:
-            if conv_storage_h != conv_storage_w:
-                raise ValueError(f"{layer_name}: dsmp input storage HW must be square, got {conv_storage_h}x{conv_storage_w}")
-            item["dsmp"] = {
-                "input_addr": hex_addr(addr_to_int(conv_out_tensor["addr"]) + conv_feature_offset),
-                "output_addr": hex_addr(addr_to_int(dsmp_out_tensor["addr"]) + feature_offset),
-                "input_storage_hw": [conv_storage_h, conv_storage_w],
-                "block_image": conv_storage_h // 8,
-                "channels": group["valid_channels"],
-            }
-            relu_input_addr = hex_addr(addr_to_int(dsmp_out_tensor["addr"]) + feature_offset)
-        else:
-            relu_input_addr = hex_addr(addr_to_int(conv_out_tensor["addr"]) + feature_offset)
-        if relu_out_tensor is not None:
-            item["relu"] = {
-                "input_addr": relu_input_addr,
-                "output_addr": hex_addr(addr_to_int(relu_out_tensor["addr"]) + feature_offset),
-            }
+
         splits.append(item)
         parameter_offset += weight_size + bias_size
 
@@ -310,7 +296,7 @@ def build_layer_execution_plan(
             f"groups={parameter_offset}, expected={expected_parameter_size}"
         )
 
-    return {
+    layer_plan = {
         "conv_index": conv_index,
         "layer": layer_name,
         "npu_max_channels_per_pass": 8,
@@ -364,6 +350,27 @@ def build_layer_execution_plan(
         },
         "splits": splits,
     }
+    if has_dsmp:
+        if conv_storage_h != conv_storage_w:
+            raise ValueError(f"{layer_name}: dsmp input storage HW must be square, got {conv_storage_h}x{conv_storage_w}")
+        layer_plan["dsmp"] = {
+            "input_addr": conv_out_tensor["addr"],
+            "output_addr": dsmp_out_tensor["addr"],
+            "input_storage_hw": [conv_storage_h, conv_storage_w],
+            "block_image": conv_storage_h // 8,
+            "channels": out_ch,
+        }
+        relu_input_addr = dsmp_out_tensor["addr"]
+    else:
+        relu_input_addr = conv_out_tensor["addr"]
+    if relu_out_tensor is not None:
+        layer_plan["relu"] = {
+            "input_addr": relu_input_addr,
+            "output_addr": relu_out_tensor["addr"],
+            "feature_size": output_storage_w,
+            "channels": out_ch,
+        }
+    return layer_plan
 
 
 def build_pool_execution_plan(
@@ -1221,3 +1228,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
+

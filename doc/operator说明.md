@@ -12,9 +12,10 @@ operator/dsmp/dsmp.py
 operator/relu/relu.py
 operator/avgpool/avgpool.py
 operator/maxpool/maxpool.py
+operator/full/full.py
 ```
 
-这些文件不再负责全局内存规划，也不再判断某一层应如何拆分。通道拆分、地址偏移、DSMP 是否需要插入等信息由 `generate_memory_plan.py` 统一写入 `memory_plan.json`。
+这些文件不再负责全局内存规划，也不再判断某一层应如何拆分。通道拆分、地址偏移、DSMP 是否需要插入、FULL 是否按输出元素展开等信息由 `generate_memory_plan.py` 统一写入 `memory_plan.json`。
 
 ## 2. 输入
 
@@ -56,16 +57,27 @@ CONV R1, R2, R3
 operator 只做和当前指令编码直接相关的检查，例如：
 
 ```text
-单次处理通道数是否 <= 8
+当前指令字段取值是否在可表达范围内
 feature size 是否在寄存器可表达范围内
 feature width 是否能被 8 整除
 kernel size 是否是 NPU 支持的编码
 start_position 是否能放入字段
 ```
 
-输入通道大于 4、输出通道拆分、地址空间分配等全局问题已经移交给 `generate_memory_plan.py`。
+conv 输入通道是否超过 256、conv 输出通道如何拆分、地址空间如何分配等全局问题已经移交给 `generate_memory_plan.py`。
 
-## 5. bias 处理约定
+## 5. CONV 通道配置
+
+`operator/conv/conv.py` 写入 RCONV 时：
+
+```text
+input_channel  = 当前层实际输入通道数，范围 1 到 256，不按 channel group 拆分
+Output_channel = 当前 conv pass 的有效输出通道数，当前每条 CONV 仍最多 8 通道
+```
+
+也就是说，当前后端只拆分 conv 输出通道；conv 输入通道字段始终配置为该层实际输入通道数。
+
+## 6. bias 处理约定
 
 卷积层的 bias 不再通过 MADD 指令单独相加。`operator/conv/conv.py` 会根据 op plan 中的 `has_bias` 写入 RCONV 的 `condition_bias` bit：
 
@@ -76,7 +88,7 @@ start_position 是否能放入字段
 
 当该 bit 为 1 时，NPU 自动从卷积核数据后面读取按 int32 排列的 bias 数据并完成相加。
 
-## 6. DSMP
+## 7. DSMP
 
 `operator/dsmp/dsmp.py` 负责生成下采样指令：
 
@@ -93,9 +105,9 @@ R2 = 下采样输出地址
 DSMP_P = 下采样输入矩阵边长 / 8 + 通道数
 ```
 
-RDSMP 的通道字段支持 1 到 32 通道。当前 conv -> dsmp 编译路径仍沿用 conv 的 channel group，因此通常按每次最多 8 个输出通道生成一条 DSMP。输入矩阵边长使用物理存储边长；若上一层逻辑输出不是 8 的倍数，NPU 会把输出补零到 8 的倍数，编译器也按补零后的边长配置 `blockedimage`。
+RDSMP 的通道字段支持 1 到 256 通道。conv 仍可按输出通道 group 拆分，但 DSMP 不再按 conv group 拆分；同一层所有 conv group 完成后，编译器只生成一条 DSMP，通道数配置为 DSMP 的实际输入通道数，也就是该层 conv 的实际输出通道数。输入矩阵边长使用物理存储边长；若上一层逻辑输出不是 8 的倍数，NPU 会把输出补零到 8 的倍数，编译器也按补零后的边长配置 `blockedimage`。
 
-## 7. AVGPOOL / MAXPOOL
+## 8. AVGPOOL / MAXPOOL
 
 `operator/avgpool/avgpool.py` 和 `operator/maxpool/maxpool.py` 负责生成专用池化指令：
 
@@ -128,7 +140,7 @@ ceil_mode   = False
 
 其他池化配置会在 memory plan 阶段报错。
 
-## 8. FULL
+## 9. FULL
 
 `operator/full/full.py` 负责生成全连接指令片段：
 
@@ -153,4 +165,5 @@ R3 = 当前输出元素对应的权重起始地址
 RFULL = input_words + start_position + condition_bias
 ```
 
-一个 FULL operator 只计算一个输出元素。`generate_instr.py` 会为 linear stage 的每个输出元素调用一次 FULL operator。
+一个 FULL operator 只计算一个输出元素。linear stage 的展开规则和参数重排规则分别见 `generate_instr说明.md`、`generate_memory_plan说明.md` 和 `NPU_特性与数据排列规则.md`。
+

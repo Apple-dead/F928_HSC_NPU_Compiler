@@ -7,11 +7,11 @@
 说明：总 COE 输出 radix = 16。
 
 输入 COE 文件顺序:
-  [0] C:\Users\60195\Documents\组会\研二下\F928_HSC_NPU_Compiler\coe\image.coe
-  [1] C:\Users\60195\Documents\组会\研二下\F928_HSC_NPU_Compiler\coe\layer1_params.coe
-  [2] C:\Users\60195\Documents\组会\研二下\F928_HSC_NPU_Compiler\coe\layer2_params.coe
-  [3] C:\Users\60195\Documents\组会\研二下\F928_HSC_NPU_Compiler\coe\layer3_params.coe
-  [4] C:\Users\60195\Documents\组会\研二下\F928_HSC_NPU_Compiler\coe\instr.coe
+  [0] C:\Users\Administrator\桌面\NPU编译器\F928_HSC_NPU_Compiler\coe\image.coe
+  [1] C:\Users\Administrator\桌面\NPU编译器\F928_HSC_NPU_Compiler\coe\layer1_params.coe
+  [2] C:\Users\Administrator\桌面\NPU编译器\F928_HSC_NPU_Compiler\coe\layer2_params.coe
+  [3] C:\Users\Administrator\桌面\NPU编译器\F928_HSC_NPU_Compiler\coe\layer3_params.coe
+  [4] C:\Users\Administrator\桌面\NPU编译器\F928_HSC_NPU_Compiler\coe\instr.coe
 
 输出总 COE 文件:
   target\all.coe
@@ -20,7 +20,7 @@
 --------------------------------------------------------------------------------
 region_index        = 0
 region_name         = image
-input_file          = C:\Users\60195\Documents\组会\研二下\F928_HSC_NPU_Compiler\coe\image.coe
+input_file          = C:\Users\Administrator\桌面\NPU编译器\F928_HSC_NPU_Compiler\coe\image.coe
 input_radix         = 16
 input_item_count    = 0x00010000 (65536)
 input_word_bytes    = 4
@@ -35,7 +35,7 @@ end_addr            = 0x0003FFFF (262143)
 --------------------------------------------------------------------------------
 region_index        = 1
 region_name         = layer1_params
-input_file          = C:\Users\60195\Documents\组会\研二下\F928_HSC_NPU_Compiler\coe\layer1_params.coe
+input_file          = C:\Users\Administrator\桌面\NPU编译器\F928_HSC_NPU_Compiler\coe\layer1_params.coe
 input_radix         = 16
 input_item_count    = 0x0000001F (31)
 input_word_bytes    = 4
@@ -50,7 +50,7 @@ end_addr            = 0x0004007B (262267)
 --------------------------------------------------------------------------------
 region_index        = 2
 region_name         = layer2_params
-input_file          = C:\Users\60195\Documents\组会\研二下\F928_HSC_NPU_Compiler\coe\layer2_params.coe
+input_file          = C:\Users\Administrator\桌面\NPU编译器\F928_HSC_NPU_Compiler\coe\layer2_params.coe
 input_radix         = 16
 input_item_count    = 0x0000003C (60)
 input_word_bytes    = 4
@@ -65,7 +65,7 @@ end_addr            = 0x0004016B (262507)
 --------------------------------------------------------------------------------
 region_index        = 3
 region_name         = layer3_params
-input_file          = C:\Users\60195\Documents\组会\研二下\F928_HSC_NPU_Compiler\coe\layer3_params.coe
+input_file          = C:\Users\Administrator\桌面\NPU编译器\F928_HSC_NPU_Compiler\coe\layer3_params.coe
 input_radix         = 16
 input_item_count    = 0x00000150 (336)
 input_word_bytes    = 4
@@ -80,19 +80,19 @@ end_addr            = 0x000406AB (263851)
 --------------------------------------------------------------------------------
 region_index        = 4
 region_name         = instr
-input_file          = C:\Users\60195\Documents\组会\研二下\F928_HSC_NPU_Compiler\coe\instr.coe
+input_file          = C:\Users\Administrator\桌面\NPU编译器\F928_HSC_NPU_Compiler\coe\instr.coe
 input_radix         = 16
-input_item_count    = 0x00000073 (115)
+input_item_count    = 0x00000052 (82)
 input_word_bytes    = 4
 input_word_endian   = little
 plan_start_addr     = 0x000406AC
-plan_size_bytes     = 460
-plan_end_exclusive  = 0x00040878
+plan_size_bytes     = 328
+plan_end_exclusive  = 0x000407F4
 padding_before      = 0x00000000 (0)
 start_addr          = 0x000406AC (263852)
-size_bytes          = 0x000001CC (460)
-end_addr            = 0x00040877 (264311)
+size_bytes          = 0x00000148 (328)
+end_addr            = 0x000407F3 (264179)
 --------------------------------------------------------------------------------
 final_padding_bytes = 0x00000000 (0)
-total_size_bytes    = 0x00040878 (264312)
-total_output_words  = 0x0001021E (66078)
+total_size_bytes    = 0x000407F4 (264180)
+total_output_words  = 0x000101FD (66045)

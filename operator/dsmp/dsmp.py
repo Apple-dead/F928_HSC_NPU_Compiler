@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 from __future__ import annotations
@@ -20,9 +20,9 @@ def cfg_addr(reg: str, addr: int) -> List[str]:
 def encode_rdsmp(block_image: int, channels: int) -> int:
     if not 1 <= block_image <= 64:
         raise ValueError(f"dsmp block_image must be in [1, 64], got {block_image}")
-    if not 1 <= channels <= 32:
-        raise ValueError(f"dsmp channels must be in [1, 32], got {channels}")
-    return ((block_image - 1) << 26) | ((channels - 1) << 21)
+    if not 1 <= channels <= 256:
+        raise ValueError(f"dsmp input channels must be in [1, 256], got {channels}")
+    return ((block_image - 1) << 26) | ((channels - 1) << 18)
 
 
 def compile_op(op_plan: Dict[str, Any], memory_plan: Dict[str, Any]) -> List[str]:
@@ -52,3 +52,4 @@ def compile_op(op_plan: Dict[str, Any], memory_plan: Dict[str, Any]) -> List[str
         "DSMP R1, R2",
     ]
     return asm
+

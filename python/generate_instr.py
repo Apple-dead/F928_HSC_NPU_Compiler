@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 from __future__ import annotations
@@ -138,7 +138,7 @@ def build_dsmp_op_plan(
     common: Dict[str, Any],
     intr_moves: Dict[str, Dict[int, int]],
 ) -> Dict[str, Any]:
-    common.update(split["dsmp"])
+    common.update(layer_plan["dsmp"])
     return common
 
 
@@ -148,13 +148,7 @@ def build_relu_op_plan(
     common: Dict[str, Any],
     intr_moves: Dict[str, Dict[int, int]],
 ) -> Dict[str, Any]:
-    common.update(
-        split["relu"]
-        | {
-            "feature_size": layer_plan["output_hw"][1],
-            "channels": split["valid_channels"],
-        }
-    )
+    common.update(layer_plan["relu"])
     return common
 
 
@@ -214,17 +208,23 @@ def build_op_plan(
 def stage_operator_sequence(layer_plan: Dict[str, Any], split: Dict[str, Any]) -> List[str]:
     op_type = layer_plan.get("op_type", "conv")
     if op_type == "conv":
-        ops = ["conv"]
-        if layer_plan.get("has_dsmp"):
-            ops.append("dsmp")
-        if "relu" in split:
-            ops.append("relu")
-        return ops
+        return ["conv"]
     if op_type in SINGLE_OPERATOR_STAGES:
         return SINGLE_OPERATOR_STAGES[op_type]
     if op_type == "linear":
         return ["full"]
     raise ValueError(f"unsupported execution plan op_type: {op_type}")
+
+
+def layer_operator_sequence(layer_plan: Dict[str, Any]) -> List[str]:
+    if layer_plan.get("op_type", "conv") != "conv":
+        return []
+    ops: List[str] = []
+    if "dsmp" in layer_plan:
+        ops.append("dsmp")
+    if "relu" in layer_plan:
+        ops.append("relu")
+    return ops
 
 
 def build_asm(memory_plan: Dict[str, Any], intr_moves: Dict[str, Dict[int, int]]) -> List[str]:
@@ -243,6 +243,11 @@ def build_asm(memory_plan: Dict[str, Any], intr_moves: Dict[str, Dict[int, int]]
                 op_plan = build_op_plan(layer_plan, split, op, intr_moves)
                 asm.extend(operators[op].compile_op(op_plan, memory_plan))
                 asm.append("")
+        layer_split = (layer_plan.get("splits") or [{}])[0]
+        for op in layer_operator_sequence(layer_plan):
+            op_plan = build_op_plan(layer_plan, layer_split, op, intr_moves)
+            asm.extend(operators[op].compile_op(op_plan, memory_plan))
+            asm.append("")
 
     asm.append("END")
     return asm
@@ -284,3 +289,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

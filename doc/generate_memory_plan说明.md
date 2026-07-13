@@ -187,8 +187,6 @@ valid_channels
 offsets_bytes
 size_bytes
 conv
-relu
-dsmp    # 仅 stride=2,padding=0 时存在
 ```
 
 `conv_index` 会传给 `generate_instr.py`，用于按 `CONV_MOVE_BY_INDEX` 查找该 conv 的 move。
@@ -198,7 +196,7 @@ dsmp    # 仅 stride=2,padding=0 时存在
 ```text
 has_relu = false
 reserved_regions 中没有 relu_out
-split 中没有 relu
+layer plan 中没有 relu
 generate_instr.py 只生成 CONV 和 END
 ```
 
@@ -213,10 +211,10 @@ generate_instr.py 只生成 CONV 和 END
 - 输入和运行时 feature map 最小按 `8x8` 预留，且 H/W 按 8 对齐。
 - `stride=1` 规划为 `conv -> relu`。
 - `stride=2,padding=0` 规划为 `conv(stride=1) -> dsmp -> relu`。
-- DSMP 的 `block_image` 按下采样输入的物理存储边长计算，即 `conv_output_hw / 8`；如果上一层逻辑输出边长不是 8 的倍数，先按 NPU 写回规则补零到 8 的倍数再配置。
+- DSMP 的 `block_image` 按下采样输入的物理存储边长计算，即 `conv_output_hw / 8`；如果上一层逻辑输出边长不是 8 的倍数，先按 NPU 写回规则补零到 8 的倍数再配置。DSMP/ReLU 的通道数按实际输入通道数配置，范围为 1 到 256，不再按 conv group 拆分。
 - `stride>2` 或 `stride=2,padding!=0` 会报错。
 
-## 追加：Linear / FULL 规划规则
+## 9. Linear / FULL 规划规则
 
 当前 memory plan 支持 `linear`，并将其规划为 `op_type = "linear"` 的 execution stage。`flatten` 已在前端透传，不会进入 `model_ir.json` 和 `memory_plan.json`。
 
@@ -237,3 +235,4 @@ linearN_params.size = out_features * (FULL 输入字节数 + optional int32 bias
 每个输出元素对应一个 split 和一条 FULL 指令。split 中输入地址保持为上一层输出 tensor 的基址；权重地址按 `bytes_per_output` 递增；输出地址按 byte 递增，因此 `linearN_out` 是 signed int8 紧密排列。
 
 当上一层逻辑通道数不是 4 的倍数时，编译器不会报错，而是在全连接权重的 padded channel 位置补 0。例如上一层输出为 1 通道时，FULL 参数布局按 4 通道处理，额外 3 个通道的权重矩阵全为 0。
+
