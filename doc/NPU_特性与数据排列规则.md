@@ -139,6 +139,13 @@ layerN_params
 instr
 ```
 
+`merge.py` 解析输入 COE 时只按文件头 `memory_initialization_radix`
+解释裸 token。当前编译器生成的 COE 均使用 `radix=16`，因此类似
+`0D010413`、`0B010203` 的 32-bit word 都必须按十六进制原样解析。
+合并阶段不支持 Python 风格 `0x`/`0b`/`0d` 前缀，也不支持 Verilog
+风格 `32'h...`/`32'b...`/`32'd...` 前缀，避免与普通十六进制 word
+发生歧义。
+
 最终输出：
 
 ```text

@@ -1,0 +1,82 @@
+多 COE 拼接地址映射说明
+================================================================================
+说明：总 COE 输出为 4-byte word 粒度，即 1 个 memory_initialization_vector 项 = 4 byte。
+说明：word 输出端序 = little。little 表示低地址 byte 在右边/低 8 位。
+说明：每个输入 COE 区域起始地址按 4 byte 对齐。
+说明：对齐填充值 pad_value = 0x00。
+说明：总 COE 输出 radix = 16。
+
+输入 COE 文件顺序:
+  [0] C:\Users\60195\Documents\组会\研二下\F928_HSC_NPU_Compiler\coe\image.coe
+  [1] C:\Users\60195\Documents\组会\研二下\F928_HSC_NPU_Compiler\coe\layer1_params.coe
+  [2] C:\Users\60195\Documents\组会\研二下\F928_HSC_NPU_Compiler\coe\linear1_params.coe
+  [3] C:\Users\60195\Documents\组会\研二下\F928_HSC_NPU_Compiler\coe\instr.coe
+
+输出总 COE 文件:
+  target\all.coe
+
+区域地址映射:
+--------------------------------------------------------------------------------
+region_index        = 0
+region_name         = image
+input_file          = C:\Users\60195\Documents\组会\研二下\F928_HSC_NPU_Compiler\coe\image.coe
+input_radix         = 16
+input_item_count    = 0x00000400 (1024)
+input_word_bytes    = 4
+input_word_endian   = little
+plan_start_addr     = 0x00000000
+plan_size_bytes     = 4096
+plan_end_exclusive  = 0x00001000
+padding_before      = 0x00000000 (0)
+start_addr          = 0x00000000 (0)
+size_bytes          = 0x00001000 (4096)
+end_addr            = 0x00000FFF (4095)
+--------------------------------------------------------------------------------
+region_index        = 1
+region_name         = layer1_params
+input_file          = C:\Users\60195\Documents\组会\研二下\F928_HSC_NPU_Compiler\coe\layer1_params.coe
+input_radix         = 16
+input_item_count    = 0x00000048 (72)
+input_word_bytes    = 4
+input_word_endian   = little
+plan_start_addr     = 0x00001000
+plan_size_bytes     = 288
+plan_end_exclusive  = 0x00001120
+padding_before      = 0x00000000 (0)
+start_addr          = 0x00001000 (4096)
+size_bytes          = 0x00000120 (288)
+end_addr            = 0x0000111F (4383)
+--------------------------------------------------------------------------------
+region_index        = 2
+region_name         = linear1_params
+input_file          = C:\Users\60195\Documents\组会\研二下\F928_HSC_NPU_Compiler\coe\linear1_params.coe
+input_radix         = 16
+input_item_count    = 0x00001400 (5120)
+input_word_bytes    = 4
+input_word_endian   = little
+plan_start_addr     = 0x00001120
+plan_size_bytes     = 20480
+plan_end_exclusive  = 0x00006120
+padding_before      = 0x00000000 (0)
+start_addr          = 0x00001120 (4384)
+size_bytes          = 0x00005000 (20480)
+end_addr            = 0x0000611F (24863)
+--------------------------------------------------------------------------------
+region_index        = 3
+region_name         = instr
+input_file          = C:\Users\60195\Documents\组会\研二下\F928_HSC_NPU_Compiler\coe\instr.coe
+input_radix         = 16
+input_item_count    = 0x00000071 (113)
+input_word_bytes    = 4
+input_word_endian   = little
+plan_start_addr     = 0x00006120
+plan_size_bytes     = 452
+plan_end_exclusive  = 0x000062E4
+padding_before      = 0x00000000 (0)
+start_addr          = 0x00006120 (24864)
+size_bytes          = 0x000001C4 (452)
+end_addr            = 0x000062E3 (25315)
+--------------------------------------------------------------------------------
+final_padding_bytes = 0x00000000 (0)
+total_size_bytes    = 0x000062E4 (25316)
+total_output_words  = 0x000018B9 (6329)
