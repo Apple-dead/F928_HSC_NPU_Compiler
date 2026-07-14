@@ -209,9 +209,10 @@ generate_instr.py 只生成 CONV 和 END
 - 大 feature map 层可按 4 通道 group 拆分。
 - conv 输入通道数当前最大支持 256。
 - 输入和运行时 feature map 最小按 `8x8` 预留，且 H/W 按 8 对齐。
+- 后端 H/W 传播采用 NPU 物理执行语义：每层使用上一层的物理 storage H/W 作为本层有效输入边长来计算输出 H/W；本层输出 H/W 再向上对齐到 8 的倍数作为下一层 storage H/W。
 - `stride=1` 规划为 `conv -> relu`。
 - `stride=2,padding=0` 规划为 `conv(stride=1) -> dsmp -> relu`。
-- DSMP 的 `block_image` 按下采样输入的物理存储边长计算，即 `conv_output_hw / 8`；如果上一层逻辑输出边长不是 8 的倍数，先按 NPU 写回规则补零到 8 的倍数再配置。DSMP/ReLU 的通道数按实际输入通道数配置，范围为 1 到 256，不再按 conv group 拆分。
+- DSMP 的输入和输出都按物理边长处理；例如输入 storage 为 `40x40` 时，DSMP 输出 H/W 为 `20x20`，再按 8 对齐为 storage。DSMP/ReLU 的通道数按实际输入通道数配置，范围为 1 到 256，不再按 conv group 拆分。
 - `stride>2` 或 `stride=2,padding!=0` 会报错。
 
 ## 9. Linear / FULL 规划规则
@@ -226,7 +227,7 @@ FULL 输入字节数 = aligned_channels * storage_height * storage_width
 FULL 输入字数 = FULL 输入字节数 / 4
 ```
 
-`linear.in_features` 必须等于逻辑输入特征数；若不一致，memory plan 阶段报错。参数区大小按物理 storage footprint 计算：
+`linear.in_features` 必须不大于后端有效输入特征数；若超过则 memory plan 阶段报错。参数区大小按物理 storage footprint 计算，原始 `in_features` 之外的位置由 `linear_params_to_bram_coe.py` 补 0 权重：
 
 ```text
 linearN_params.size = out_features * (FULL 输入字节数 + optional int32 bias)
@@ -235,4 +236,3 @@ linearN_params.size = out_features * (FULL 输入字节数 + optional int32 bias
 每个输出元素对应一个 split 和一条 FULL 指令。split 中输入地址保持为上一层输出 tensor 的基址；权重地址按 `bytes_per_output` 递增；输出地址按 byte 递增，因此 `linearN_out` 是 signed int8 紧密排列。
 
 当上一层逻辑通道数不是 4 的倍数时，编译器不会报错，而是在全连接权重的 padded channel 位置补 0。例如上一层输出为 1 通道时，FULL 参数布局按 4 通道处理，额外 3 个通道的权重矩阵全为 0。
-

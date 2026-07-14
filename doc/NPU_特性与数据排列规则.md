@@ -108,7 +108,7 @@ group1 feature map
 ...
 ```
 
-每个 feature map 的通道数按 4 对齐。若单通道矩阵逻辑尺寸小于 8x8，运行时区域仍按 8x8 预留；若 H/W 不是 8 的倍数，物理存储尺寸也会向上对齐到 8 的倍数。逻辑尺寸保存在 `shape_nchw` / `logical_*_hw`，实际占用保存在 `storage_shape_nchw` / `*_hw`。
+每个 feature map 的通道数按 4 对齐。若单通道矩阵尺寸小于 8x8，运行时区域仍按 8x8 预留；若 H/W 不是 8 的倍数，物理存储尺寸也会向上对齐到 8 的倍数。后端按 NPU 物理执行语义传播 H/W：下一层使用上一层的 storage H/W 作为有效输入边长计算输出 H/W，本层输出再向上对齐到 8 的倍数作为下一层 storage H/W。有效输出尺寸保存在 `shape_nchw` / `logical_*_hw`，实际占用保存在 `storage_shape_nchw` / `*_hw`。
 
 ## 8. 通道拆分
 

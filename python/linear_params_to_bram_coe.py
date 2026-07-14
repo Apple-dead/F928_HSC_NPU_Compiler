@@ -22,10 +22,17 @@ def convert_linear_weights(
     input_storage_height: int,
     input_storage_width: int,
 ) -> List[int]:
-    expected = out_features * input_channels * input_height * input_width
-    if flat_values.size != expected:
+    physical_logical_features = input_channels * input_height * input_width
+    expected_max = out_features * physical_logical_features
+    if flat_values.size % out_features != 0:
         raise ValueError(
-            f"linear weight count mismatch: file has {flat_values.size}, expected {expected} "
+            f"linear weight count mismatch: file has {flat_values.size}, "
+            f"not divisible by out_features={out_features}"
+        )
+    in_features = flat_values.size // out_features
+    if in_features > physical_logical_features:
+        raise ValueError(
+            f"linear weight count mismatch: file has {flat_values.size}, max expected {expected_max} "
             f"for out_features={out_features}, input={input_channels}x{input_height}x{input_width}"
         )
     if aligned_input_channels < input_channels:
@@ -41,12 +48,15 @@ def convert_linear_weights(
         raise ValueError(f"FULL input channels must be padded to a multiple of 4, got {aligned_input_channels}")
 
     check_int8_range(flat_values)
-    original = flat_values.reshape(out_features, input_channels, input_height, input_width)
+    original = flat_values.reshape(out_features, in_features)
     padded = np.zeros(
         (out_features, aligned_input_channels, input_storage_height, input_storage_width),
         dtype=np.int64,
     )
-    padded[:, :input_channels, :input_height, :input_width] = original
+    padded[:, :input_channels, :input_height, :input_width].reshape(
+        out_features,
+        physical_logical_features,
+    )[:, :in_features] = original
 
     emitted: List[int] = []
     for output_index in range(out_features):

@@ -699,12 +699,10 @@ def plan_pool_unit(
     layer_name = unit["layer"]
     _, input_tensor_name, input_shape = require_input_value(unit, value_tensors, value_shapes)
     input_tensor_info = plan["tensors"][input_tensor_name]
-    pool_input_h = int(input_shape["height"])
-    pool_input_w = int(input_shape["width"])
     pool_input_storage_h = int(input_shape["storage_height"])
     pool_input_storage_w = int(input_shape["storage_width"])
     pool_channels = int(input_shape["aligned_channels"])
-    pool_out_h, pool_out_w = pool_output_hw(pool_input_h, pool_input_w, unit["pool"])
+    pool_out_h, pool_out_w = pool_output_hw(pool_input_storage_h, pool_input_storage_w, unit["pool"])
     pool_storage_h, pool_storage_w = runtime_storage_hw(pool_out_h, pool_out_w)
     pool_output_size = pool_storage_h * pool_storage_w * pool_channels
     tensor_name = f"{layer_name}_out"
@@ -768,11 +766,11 @@ def plan_linear_unit(
     input_storage_w = int(input_shape["storage_width"])
     in_features = int(unit["in_features"])
     out_features = int(unit["out_features"])
-    expected_in_features = input_ch * input_h * input_w
-    if in_features != expected_in_features:
+    max_in_features = input_ch * input_h * input_w
+    if in_features > max_in_features:
         raise ValueError(
-            f"{layer_name}: linear in_features={in_features} does not match previous output "
-            f"{input_ch}x{input_h}x{input_w}={expected_in_features}"
+            f"{layer_name}: linear in_features={in_features} exceeds previous physical output "
+            f"{input_ch}x{input_h}x{input_w}={max_in_features}"
         )
 
     input_storage_bytes = aligned_input_ch * input_storage_h * input_storage_w
@@ -921,8 +919,8 @@ def plan_conv_unit(
     has_relu = bool(unit.get("has_relu", False))
     layer_name = f"layer{idx}"
     _, input_tensor_name, input_shape = require_input_value(unit, value_tensors, value_shapes)
-    height = int(input_shape["height"])
-    width = int(input_shape["width"])
+    height = int(input_shape["storage_height"])
+    width = int(input_shape["storage_width"])
     in_ch = conv["in_channels"]
     out_ch = conv["out_channels"]
     if in_ch != int(input_shape["channels"]):
@@ -935,8 +933,12 @@ def plan_conv_unit(
     aligned_out_ch = aligned_channels(out_ch)
     kh, kw = conv["kernel_size"]
     needs_dsmp = layer_needs_dsmp(conv)
-    out_h, out_w = conv_output_hw(height, width, conv)
-    conv_out_h, conv_out_w = (height, width) if needs_dsmp else (out_h, out_w)
+    if needs_dsmp:
+        conv_out_h, conv_out_w = height, width
+        out_h, out_w = conv_out_h // 2, conv_out_w // 2
+    else:
+        out_h, out_w = conv_output_hw(height, width, conv)
+        conv_out_h, conv_out_w = out_h, out_w
     conv_storage_h, conv_storage_w = runtime_storage_hw(conv_out_h, conv_out_w)
     output_storage_h, output_storage_w = runtime_storage_hw(out_h, out_w)
 
@@ -1228,7 +1230,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 
 
 

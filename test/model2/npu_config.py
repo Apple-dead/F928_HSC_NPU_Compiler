@@ -6,8 +6,8 @@ INIT_LIMIT_ADDR = 0x00200000
 RUNTIME_BASE_ADDR = 0x00200000
 
 MODEL_FORMAT = "pt2"
-MODEL_PATH = "./model/lenet_0713_ptq_int8.pt2"
-INTR_MOVE_PATH = "./model/intr_move.json"
+MODEL_PATH = "./test/model2/model.pt2"
+INTR_MOVE_PATH = "./test/model2/intr_move.json"
 
 IMAGE_BASE_ADDR = 0x00000000
 
@@ -18,7 +18,7 @@ IMAGE_BASE_ADDR = 0x00000000
 #                map is already available at IMAGE_BASE_ADDR, and initialized
 #                params/instructions start at INIT_BASE_ADDR.
 IMAGE_SOURCE = "coe"
-IMAGE_PATH = "./coe/image.coe"
+IMAGE_PATH = "./test/model2/image.coe"
 
 # Fallback input size only. The PT2 frontend and memory planner prefer input
 # shape metadata exported in the PT2 graph. These values are used only when
