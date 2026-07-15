@@ -1107,11 +1107,14 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
     image_addr = cfg.INIT_BASE_ADDR if cfg.IMAGE_SOURCE == "coe" else cfg.IMAGE_BASE_ADDR
     input_storage_shape = [1, image_aligned_ch, input_storage_h, input_storage_w]
 
+    runtime_limit_addr = getattr(cfg, "RUNTIME_LIMIT_ADDR", 0xFFFFFFFF)
+
     plan: Dict[str, Any] = {
         "config": {
             "INIT_BASE_ADDR": hex_addr(cfg.INIT_BASE_ADDR),
             "INIT_LIMIT_ADDR": hex_addr(cfg.INIT_LIMIT_ADDR),
             "RUNTIME_BASE_ADDR": hex_addr(cfg.RUNTIME_BASE_ADDR),
+            "RUNTIME_LIMIT_ADDR": hex_addr(runtime_limit_addr),
             "IMAGE_BASE_ADDR": hex_addr(cfg.IMAGE_BASE_ADDR),
             "IMAGE_SOURCE": cfg.IMAGE_SOURCE,
             "IMAGE_PATH": image_file,
@@ -1181,6 +1184,11 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
         raise ValueError(
             f"init region exceeds INIT_LIMIT_ADDR: next={hex_addr(init_end)}, limit={hex_addr(cfg.INIT_LIMIT_ADDR)}"
         )
+    runtime_end = plan["_next_runtime_addr"]
+    if runtime_end > runtime_limit_addr:
+        raise ValueError(
+            f"runtime region exceeds RUNTIME_LIMIT_ADDR: next={hex_addr(runtime_end)}, limit={hex_addr(runtime_limit_addr)}"
+        )
     if cfg.RUNTIME_BASE_ADDR < cfg.INIT_LIMIT_ADDR:
         raise ValueError(
             f"RUNTIME_BASE_ADDR {hex_addr(cfg.RUNTIME_BASE_ADDR)} overlaps init address window "
@@ -1206,7 +1214,7 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
         )
 
     plan["init_end_addr_exclusive"] = hex_addr(init_end)
-    plan["runtime_end_addr_exclusive"] = hex_addr(plan["_next_runtime_addr"])
+    plan["runtime_end_addr_exclusive"] = hex_addr(runtime_end)
     del plan["_next_init_addr"]
     del plan["_next_runtime_addr"]
     return plan
