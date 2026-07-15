@@ -108,7 +108,7 @@ group1 feature map
 ...
 ```
 
-每个 feature map 的通道数按 4 对齐。若单通道矩阵逻辑尺寸小于 8x8，运行时区域仍按 8x8 预留；若 H/W 不是 8 的倍数，物理存储尺寸也会向上对齐到 8 的倍数。逻辑尺寸保存在 `shape_nchw` / `logical_*_hw`，实际占用保存在 `storage_shape_nchw` / `*_hw`。
+每个 feature map 的通道数按 4 对齐。若单通道矩阵尺寸小于 8x8，运行时区域仍按 8x8 预留；若 H/W 不是 8 的倍数，物理存储尺寸也会向上对齐到 8 的倍数。后端按 NPU 物理执行语义传播 H/W：下一层使用上一层的 storage H/W 作为有效输入边长计算输出 H/W，本层输出再向上对齐到 8 的倍数作为下一层 storage H/W。有效输出尺寸保存在 `shape_nchw` / `logical_*_hw`，实际占用保存在 `storage_shape_nchw` / `*_hw`。
 
 ## 8. 通道拆分
 
@@ -139,9 +139,53 @@ layerN_params
 instr
 ```
 
+`merge.py` 解析输入 COE 时只按文件头 `memory_initialization_radix`
+解释裸 token。当前编译器生成的 COE 均使用 `radix=16`，因此类似
+`0D010413`、`0B010203` 的 32-bit word 都必须按十六进制原样解析。
+合并阶段不支持 Python 风格 `0x`/`0b`/`0d` 前缀，也不支持 Verilog
+风格 `32'h...`/`32'b...`/`32'd...` 前缀，避免与普通十六进制 word
+发生歧义。
+
 最终输出：
 
 ```text
 target/all.coe
 target/all.coe.map.txt
 ```
+
+## 10. Linear / FULL 参数与输出布局
+
+前端仍按 PyTorch 逻辑布局导出全连接参数：
+
+```text
+linear weight: [out_features, in_features]
+linear bias  : [out_features]，仅有 bias 时生成，int32
+```
+
+`flatten` 不写入 IR 和 memory plan。FULL 直接读取上一层 NPU 输出的物理存储数据。编译器在生成 `linearN_params.coe` 时，把每个输出神经元的权重重排为上一层输出的物理 footprint：
+
+```text
+out0 padded/interleaved weights
+out0 bias (optional int32)
+out1 padded/interleaved weights
+out1 bias (optional int32)
+...
+```
+
+单个输出的权重先扩展到：
+
+```text
+[aligned_input_channels, input_storage_height, input_storage_width]
+```
+
+其中逻辑通道不足 4 的倍数时补 0 通道；逻辑 H/W 小于 storage H/W 时，padded 行列也补 0。写入顺序为每 4 通道一组，组内按同一空间位置交织：
+
+```text
+group0 row0 col0 ch0, ch1, ch2, ch3
+group0 row0 col1 ch0, ch1, ch2, ch3
+...
+group1 row0 col0 ch4, ch5, ch6, ch7
+...
+```
+
+FULL 输出是 signed int8，`linearN_out` runtime 区按 byte 紧密排列：第 0 个输出在 base，第 1 个输出在 base+1，以此类推。

@@ -23,6 +23,10 @@ SPECIAL_REGISTER_CODE = {
     "RELU_P_1": 0x05,
     "RELU_P_2": 0x06,
     "MADD_P": 0x09,
+    "AVGPOOL_P": 0x0C,
+    "MAXPOOL_P": 0x0E,
+    "FULL_P_1": 0x10,
+    "FULL_P_2": 0x11,
 }
 
 COMPUTE_OPCODE = {
@@ -30,6 +34,9 @@ COMPUTE_OPCODE = {
     "DSMP": 0b000100,
     "RELU": 0b000101,
     "MADD": 0b000111,
+    "AVGPOOL": 0b001000,
+    "MAXPOOL": 0b001001,
+    "FULL": 0b001010,
 }
 
 COMPUTE_OPERAND_COUNT = {
@@ -37,6 +44,9 @@ COMPUTE_OPERAND_COUNT = {
     "DSMP": 2,
     "RELU": 2,
     "MADD": 3,
+    "AVGPOOL": 2,
+    "MAXPOOL": 2,
+    "FULL": 3,
 }
 
 
@@ -123,7 +133,7 @@ def assemble_line(line: str) -> int | None:
         if operands:
             raise ValueError("END does not take operands")
         return END_WORD
-    if mnemonic in ("CONV", "DSMP", "MADD", "RELU"):
+    if mnemonic in COMPUTE_OPCODE:
         return encode_compute(mnemonic, operands)
 
     raise ValueError(f"unsupported instruction: {mnemonic}")

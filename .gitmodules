@@ -1,0 +1,3 @@
+[submodule "test"]
+	path = test
+	url = git@github.com:Apple-dead/F928_HSC_NPU_Compiler_tests.git

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 from __future__ import annotations
@@ -23,6 +23,15 @@ OPERATOR_PATHS = {
     "conv": PROJECT_ROOT / "operator" / "conv" / "conv.py",
     "dsmp": PROJECT_ROOT / "operator" / "dsmp" / "dsmp.py",
     "relu": PROJECT_ROOT / "operator" / "relu" / "relu.py",
+    "avgpool": PROJECT_ROOT / "operator" / "avgpool" / "avgpool.py",
+    "maxpool": PROJECT_ROOT / "operator" / "maxpool" / "maxpool.py",
+    "full": PROJECT_ROOT / "operator" / "full" / "full.py",
+}
+
+
+SINGLE_OPERATOR_STAGES = {
+    "avgpool": ["avgpool"],
+    "maxpool": ["maxpool"],
 }
 
 
@@ -70,11 +79,15 @@ def move_to_start_position(move: int | float, *, conv_index: int, op: str) -> in
 
 def load_intr_moves(path: Path) -> Dict[str, Dict[int, int]]:
     data = read_json(path)
-    field = "CONV_MOVE_BY_INDEX"
-    raw = data.get(field)
-    if not isinstance(raw, dict):
-        raise ValueError(f"{path} must contain object field {field}")
-    return {field: {int(index): int(move) for index, move in raw.items()}}
+    result: Dict[str, Dict[int, int]] = {}
+    for field in ("CONV_MOVE_BY_INDEX", "FULL_MOVE_BY_INDEX"):
+        raw = data.get(field, {})
+        if raw is None:
+            raw = {}
+        if not isinstance(raw, dict):
+            raise ValueError(f"{path} field {field} must be an object when present")
+        result[field] = {int(index): int(move) for index, move in raw.items()}
+    return result
 
 
 def get_start_position(intr_moves: Dict[str, Dict[int, int]], field: str, conv_index: int, op: str) -> int:
@@ -85,16 +98,10 @@ def get_start_position(intr_moves: Dict[str, Dict[int, int]], field: str, conv_i
     return move_to_start_position(move, conv_index=conv_index, op=op)
 
 
-def build_op_plan(
-    layer_plan: Dict[str, Any],
-    split: Dict[str, Any],
-    op: str,
-    intr_moves: Dict[str, Dict[int, int]],
-) -> Dict[str, Any]:
-    conv_index = int(layer_plan["conv_index"])
-    common = {
+def common_op_plan(layer_plan: Dict[str, Any], split: Dict[str, Any], op: str) -> Dict[str, Any]:
+    return {
         "op": op,
-        "conv_index": conv_index,
+        "conv_index": int(layer_plan.get("conv_index", 0)),
         "layer": layer_plan["layer"],
         "group_index": split["group_index"],
         "start_channel": split["start_channel"],
@@ -103,35 +110,121 @@ def build_op_plan(
         "has_padding": split["has_padding"],
     }
 
-    if op == "conv":
-        common.update(
-            split["conv"]
-            | {
-                "kernel_size": layer_plan["kernel_size"],
-                "feature_size": layer_plan["conv_output_hw"][1],
-                "input_channels": layer_plan["input_channels"],
-                "output_channels": split["valid_channels"],
-                "has_bias": bool(split["conv"].get("has_bias", False)),
-                "start_position": get_start_position(intr_moves, "CONV_MOVE_BY_INDEX", conv_index, "conv"),
-            }
-        )
-        return common
 
-    if op == "dsmp":
-        common.update(split["dsmp"])
-        return common
+def build_conv_op_plan(
+    layer_plan: Dict[str, Any],
+    split: Dict[str, Any],
+    common: Dict[str, Any],
+    intr_moves: Dict[str, Dict[int, int]],
+) -> Dict[str, Any]:
+    conv_index = int(layer_plan["conv_index"])
+    common.update(
+        split["conv"]
+        | {
+            "kernel_size": layer_plan["kernel_size"],
+            "feature_size": layer_plan["conv_output_hw"][1],
+            "input_channels": layer_plan["input_channels"],
+            "output_channels": split["valid_channels"],
+            "has_bias": bool(split["conv"].get("has_bias", False)),
+            "start_position": get_start_position(intr_moves, "CONV_MOVE_BY_INDEX", conv_index, "conv"),
+        }
+    )
+    return common
 
-    if op == "relu":
-        common.update(
-            split["relu"]
-            | {
-                "feature_size": layer_plan["output_hw"][1],
-                "channels": split["valid_channels"],
-            }
-        )
-        return common
 
-    raise ValueError(f"unsupported op: {op}")
+def build_dsmp_op_plan(
+    layer_plan: Dict[str, Any],
+    split: Dict[str, Any],
+    common: Dict[str, Any],
+    intr_moves: Dict[str, Dict[int, int]],
+) -> Dict[str, Any]:
+    common.update(layer_plan["dsmp"])
+    return common
+
+
+def build_relu_op_plan(
+    layer_plan: Dict[str, Any],
+    split: Dict[str, Any],
+    common: Dict[str, Any],
+    intr_moves: Dict[str, Dict[int, int]],
+) -> Dict[str, Any]:
+    common.update(layer_plan["relu"])
+    return common
+
+
+def build_pool_op_plan(
+    layer_plan: Dict[str, Any],
+    split: Dict[str, Any],
+    common: Dict[str, Any],
+    intr_moves: Dict[str, Dict[int, int]],
+) -> Dict[str, Any]:
+    common.update(split["pool"])
+    return common
+
+
+def build_full_op_plan(
+    layer_plan: Dict[str, Any],
+    split: Dict[str, Any],
+    common: Dict[str, Any],
+    intr_moves: Dict[str, Dict[int, int]],
+) -> Dict[str, Any]:
+    linear_index = int(layer_plan["linear_index"])
+    common.update(
+        split["full"]
+        | {
+            "linear_index": linear_index,
+            "output_index": int(split["output_index"]),
+            "input_words": int(layer_plan["input_words"]),
+            "has_bias": bool(split["full"].get("has_bias", False)),
+            "start_position": get_start_position(intr_moves, "FULL_MOVE_BY_INDEX", linear_index, "full"),
+        }
+    )
+    return common
+
+
+OP_PLAN_BUILDERS = {
+    "conv": build_conv_op_plan,
+    "dsmp": build_dsmp_op_plan,
+    "relu": build_relu_op_plan,
+    "avgpool": build_pool_op_plan,
+    "maxpool": build_pool_op_plan,
+    "full": build_full_op_plan,
+}
+
+
+def build_op_plan(
+    layer_plan: Dict[str, Any],
+    split: Dict[str, Any],
+    op: str,
+    intr_moves: Dict[str, Dict[int, int]],
+) -> Dict[str, Any]:
+    try:
+        builder = OP_PLAN_BUILDERS[op]
+    except KeyError as exc:
+        raise ValueError(f"unsupported op: {op}") from exc
+    return builder(layer_plan, split, common_op_plan(layer_plan, split, op), intr_moves)
+
+
+def stage_operator_sequence(layer_plan: Dict[str, Any], split: Dict[str, Any]) -> List[str]:
+    op_type = layer_plan.get("op_type", "conv")
+    if op_type == "conv":
+        return ["conv"]
+    if op_type in SINGLE_OPERATOR_STAGES:
+        return SINGLE_OPERATOR_STAGES[op_type]
+    if op_type == "linear":
+        return ["full"]
+    raise ValueError(f"unsupported execution plan op_type: {op_type}")
+
+
+def layer_operator_sequence(layer_plan: Dict[str, Any]) -> List[str]:
+    if layer_plan.get("op_type", "conv") != "conv":
+        return []
+    ops: List[str] = []
+    if "dsmp" in layer_plan:
+        ops.append("dsmp")
+    if "relu" in layer_plan:
+        ops.append("relu")
+    return ops
 
 
 def build_asm(memory_plan: Dict[str, Any], intr_moves: Dict[str, Dict[int, int]]) -> List[str]:
@@ -146,15 +239,15 @@ def build_asm(memory_plan: Dict[str, Any], intr_moves: Dict[str, Dict[int, int]]
         asm.append(f"; ===== {layer_plan['layer']} =====")
         for split in layer_plan.get("splits", []):
             asm.append(f"; -- group{split['group_index']} ch{split['start_channel']}+{split['channels']} --")
-            ops = ["conv"]
-            if layer_plan.get("has_dsmp"):
-                ops.append("dsmp")
-            if "relu" in split:
-                ops.append("relu")
-            for op in ops:
+            for op in stage_operator_sequence(layer_plan, split):
                 op_plan = build_op_plan(layer_plan, split, op, intr_moves)
                 asm.extend(operators[op].compile_op(op_plan, memory_plan))
                 asm.append("")
+        layer_split = (layer_plan.get("splits") or [{}])[0]
+        for op in layer_operator_sequence(layer_plan):
+            op_plan = build_op_plan(layer_plan, layer_split, op, intr_moves)
+            asm.extend(operators[op].compile_op(op_plan, memory_plan))
+            asm.append("")
 
     asm.append("END")
     return asm
@@ -196,3 +289,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

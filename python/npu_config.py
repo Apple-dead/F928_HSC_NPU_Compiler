@@ -6,7 +6,7 @@ INIT_LIMIT_ADDR = 0x00200000
 RUNTIME_BASE_ADDR = 0x00200000
 
 MODEL_FORMAT = "pt2"
-MODEL_PATH = "./model/Yolov2_0708_ptq_int8.pt2"
+MODEL_PATH = "./model/lenet_0713_ptq_int8.pt2"
 INTR_MOVE_PATH = "./model/intr_move.json"
 
 IMAGE_BASE_ADDR = 0x00000000
@@ -20,15 +20,16 @@ IMAGE_BASE_ADDR = 0x00000000
 IMAGE_SOURCE = "coe"
 IMAGE_PATH = "./coe/image.coe"
 
-# Original model input size. The PT2 frontend prefers the exported graph's
-# input metadata and falls back to these values if metadata is unavailable.
+# Fallback input size only. The PT2 frontend and memory planner prefer input
+# shape metadata exported in the PT2 graph. These values are used only when
+# that metadata is missing.
 INPUT_HEIGHT = 28
 INPUT_WIDTH = 28
 
 # 1: export the full PT2 inference graph.
 # 2: export the first INFER_PARSE_OP_LIMIT effective IR ops. Quantization
 #    helper nodes such as clamp/to/floor are passthrough and do not count.
-INFER_PARSE_MODE = 2
+INFER_PARSE_MODE = 1
 INFER_PARSE_OP_LIMIT = 6
 
 INSTR_WORD_BYTES = 4

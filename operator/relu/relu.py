@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 from __future__ import annotations
@@ -24,11 +24,13 @@ def split_u32(value: int) -> Tuple[int, int]:
 def encode_rrelu(feature_size: int, channels: int, tan: int) -> int:
     if not 1 <= feature_size <= 1024:
         raise ValueError(f"relu feature size must be in [1, 1024], got {feature_size}")
-    if not 1 <= channels <= 8:
-        raise ValueError(f"relu channels per pass must be <= 8, got {channels}")
+    if feature_size % 8 != 0:
+        raise ValueError(f"relu feature size must be divisible by 8, got {feature_size}")
+    if not 1 <= channels <= 256:
+        raise ValueError(f"relu input channels must be in [1, 256], got {channels}")
     if not 0 <= tan <= 0xFF:
         raise ValueError(f"relu tan must fit in 8 bits, got {tan}")
-    return ((feature_size - 1) << 22) | ((channels - 1) << 17) | (tan << 9)
+    return ((feature_size - 1) << 22) | ((channels - 1) << 14) | (tan << 6)
 
 
 def compile_op(op_plan: Dict[str, Any], memory_plan: Dict[str, Any]) -> List[str]:
@@ -53,3 +55,4 @@ def compile_op(op_plan: Dict[str, Any], memory_plan: Dict[str, Any]) -> List[str
         "RELU R1, R2",
     ]
     return asm
+

@@ -55,35 +55,15 @@ def strip_comment(line: str) -> str:
 
 def parse_number_token(token: str, default_radix: int) -> int:
     """
-    解析 COE 初始化项。
+    严格按 COE 文件头 memory_initialization_radix 解析裸 token。
 
-    支持：
-      - 普通 radix 数字，例如 radix=16 时的 0D / FF / 12 / 001F2220；
-      - Python 风格 0x12 / 0b1010 / 0d123；
-      - Verilog 风格 32'h04200000 / 8'h0D / 32'b1010。
-
-    注意：
-      只有完整形如 0d123 的 token 才按十进制前缀解析。
-      单独的 0D 在 radix=16 时是合法十六进制 byte，不能误判为十进制前缀。
+    不支持 Python 风格 0x/0b/0d 前缀，也不支持 Verilog 风格
+    32'h.../32'b.../32'd... 前缀，避免把 radix=16 下的普通 word
+    例如 0D010413 误判为十进制前缀。
     """
     t = token.strip().strip(",").strip().rstrip(";").strip()
     if not t:
         raise ValueError("empty token")
-
-    m = re.fullmatch(r"(?:\d+)?'([hHbBdD])([0-9a-fA-F_xXzZ]+)", t)
-    if m:
-        base_ch = m.group(1).lower()
-        digits = m.group(2).replace("_", "")
-        digits = digits.replace("x", "0").replace("X", "0").replace("z", "0").replace("Z", "0")
-        base = {"h": 16, "b": 2, "d": 10}[base_ch]
-        return int(digits, base)
-
-    if re.fullmatch(r"0[xX][0-9a-fA-F_]+", t):
-        return int(t[2:].replace("_", ""), 16)
-    if re.fullmatch(r"0[bB][01_]+", t):
-        return int(t[2:].replace("_", ""), 2)
-    if re.fullmatch(r"0[dD][0-9_]+", t):
-        return int(t[2:].replace("_", ""), 10)
 
     return int(t.replace("_", ""), default_radix)
 

@@ -25,6 +25,8 @@ CONV
 DSMP
 RELU
 MADD
+AVGPOOL
+MAXPOOL
 END
 ```
 
@@ -52,6 +54,8 @@ CFG_REGISTER DSMP_P,   ...
 CFG_REGISTER RELU_P_1, ...
 CFG_REGISTER RELU_P_2, ...
 CFG_REGISTER MADD_P,   ...
+CFG_REGISTER AVGPOOL_P, ...
+CFG_REGISTER MAXPOOL_P, ...
 ```
 
 ## 4. 计算指令编码
@@ -98,3 +102,23 @@ R2 = 输出数据地址
 ```
 
 第三个寄存器字段在编码时置 0。
+
+## 7. FULL 支持
+
+`assembler.py` 支持全连接相关汇编：
+
+```asm
+CFG_REGISTER FULL_P_1, 0x....
+CFG_REGISTER FULL_P_2, 0x....
+FULL R1, R2, R3
+```
+
+`FULL_P_1` / `FULL_P_2` 的 special register code 分别为 `0x10` / `0x11`。`FULL` 的 opcode 为 `001010`，操作数语义为：
+
+```text
+R1 = 输入数据起始地址
+R2 = signed int8 输出写回地址
+R3 = 全连接权重起始地址
+```
+
+输出地址允许 byte 粒度递增，由 NPU 保证 FULL 输出为 signed int8。

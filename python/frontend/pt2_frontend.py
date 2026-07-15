@@ -18,7 +18,7 @@ TARGET_TO_OP = {
     "aten.relu.default": "relu",
     "aten.leaky_relu.default": "relu",
     "aten.avg_pool2d.default": "avgpool2d",
-    "aten.flatten.using_ints": "flatten",
+    "aten.max_pool2d.default": "maxpool2d",
     "aten.linear.default": "linear",
 }
 
@@ -26,6 +26,7 @@ PASSTHROUGH_TARGETS = {
     "aten.clamp.default",
     "aten.to.dtype",
     "aten.floor.default",
+    "aten.flatten.using_ints",
 }
 
 
@@ -196,7 +197,7 @@ def export_model_ir(*, model_path: Path, ir_out: Path, params_dir: Path, config:
         input_shape = [1, 0, int(config.INPUT_HEIGHT), int(config.INPUT_WIDTH)]
 
     ops: list[dict[str, Any]] = []
-    counters = {"conv2d": 0, "relu": 0, "avgpool2d": 0, "flatten": 0, "linear": 0}
+    counters = {"conv2d": 0, "relu": 0, "avgpool2d": 0, "maxpool2d": 0, "linear": 0}
     value_names = {user_input: user_input}
     op_limit = infer_op_limit(config)
 
@@ -227,6 +228,9 @@ def export_model_ir(*, model_path: Path, ir_out: Path, params_dir: Path, config:
             "input": value_names.get(input_node_name, input_node_name),
             "output": logical_output,
         }
+        output_shape = fake_shape(node)
+        if output_shape is not None:
+            item["output_shape"] = output_shape
 
         if op == "conv2d":
             layer_index = counters[op]
@@ -271,13 +275,18 @@ def export_model_ir(*, model_path: Path, ir_out: Path, params_dir: Path, config:
             if item["stride"] == [0, 0]:
                 item["stride"] = item["kernel_size"]
 
-        elif op == "flatten":
+        elif op == "maxpool2d":
             item.update(
                 {
-                    "start_dim": int(node.kwargs.get("start_dim", node.args[1] if len(node.args) > 1 else 0)),
-                    "end_dim": int(node.kwargs.get("end_dim", node.args[2] if len(node.args) > 2 else -1)),
+                    "kernel_size": normalize_pair(node.args[1] if len(node.args) > 1 else node.kwargs.get("kernel_size")),
+                    "stride": normalize_pair(node.kwargs.get("stride", node.args[2] if len(node.args) > 2 else None), default=[0, 0]),
+                    "padding": normalize_pair(node.kwargs.get("padding", node.args[3] if len(node.args) > 3 else None), default=[0, 0]),
+                    "dilation": normalize_pair(node.kwargs.get("dilation", node.args[4] if len(node.args) > 4 else None), default=[1, 1]),
+                    "ceil_mode": bool(node.kwargs.get("ceil_mode", node.args[5] if len(node.args) > 5 else False)),
                 }
             )
+            if item["stride"] == [0, 0]:
+                item["stride"] = item["kernel_size"]
 
         elif op == "linear":
             linear_index = counters[op]
