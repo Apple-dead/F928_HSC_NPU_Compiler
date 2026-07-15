@@ -11,6 +11,8 @@ set "INSTR_COE_PATH=.\coe\instr.coe"
 
 rem ===========TARGET COE=============
 set "TARGET_COE_PATH=.\target\all.coe"
+set "NPU_PARAMS_BIN_PATH=.\target\npu_params.bin"
+set "NPU_INSTR_BIN_PATH=.\target\npu_instr.bin"
 
 if "%~1"=="clean" (
     call :clean
@@ -51,6 +53,10 @@ rem merge coe
 python .\python\merge.py --memory-plan .\data\memory_plan.json "%TARGET_COE_PATH%"
 if errorlevel 1 exit /b 1
 
+rem export DDR binary images
+python .\python\coe_to_bin\export_npu_bins.py --memory-plan .\data\memory_plan.json --out-dir .\target
+if errorlevel 1 exit /b 1
+
 exit /b 0
 
 :clean
@@ -64,8 +70,10 @@ if exist ".\data\instr.txt" del /q ".\data\instr.txt"
 del /q ".\coe\layer*_params.coe" 2>nul
 del /q ".\coe\linear*_params.coe" 2>nul
 if exist ".\coe\instr.coe" del /q ".\coe\instr.coe"
-if exist ".\target\all.coe" del /q ".\target\all.coe"
+if exist "%TARGET_COE_PATH%" del /q "%TARGET_COE_PATH%"
 if exist ".\target\all.coe.map.txt" del /q ".\target\all.coe.map.txt"
+if exist "%NPU_PARAMS_BIN_PATH%" del /q "%NPU_PARAMS_BIN_PATH%"
+if exist "%NPU_INSTR_BIN_PATH%" del /q "%NPU_INSTR_BIN_PATH%"
 for /d /r %%D in (__pycache__) do (
     if exist "%%D" rmdir /s /q "%%D"
 )

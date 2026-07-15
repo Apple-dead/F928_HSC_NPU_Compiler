@@ -11,6 +11,8 @@ INSTR_COE_PATH="./coe/instr.coe"
 
 #===========TARGET COE=============
 TARGET_COE_PATH="./target/all.coe"
+NPU_PARAMS_BIN_PATH="./target/npu_params.bin"
+NPU_INSTR_BIN_PATH="./target/npu_instr.bin"
 
 clean() {
   echo "[CLEAN] remove generated files"
@@ -25,7 +27,9 @@ clean() {
     ./coe/linear*_params.coe \
     ./coe/instr.coe \
     ./target/all.coe \
-    ./target/all.coe.map.txt
+    ./target/all.coe.map.txt \
+    "$NPU_PARAMS_BIN_PATH" \
+    "$NPU_INSTR_BIN_PATH"
   find . -type d -name '__pycache__' -prune -exec rm -rf {} +
   echo "[CLEAN] done"
 }
@@ -65,3 +69,6 @@ python ./python/instr_txt_to_bram_coe.py "$INSTR_PATH" "$INSTR_COE_PATH"
 
 #merge coe
 python ./python/merge.py --memory-plan ./data/memory_plan.json "$TARGET_COE_PATH"
+
+#export DDR binary images
+python ./python/coe_to_bin/export_npu_bins.py --memory-plan ./data/memory_plan.json --out-dir ./target
