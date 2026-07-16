@@ -69,6 +69,27 @@ def add_runtime_region(plan: Dict[str, Any], name: str, size: int, **extra: Any)
     return item
 
 
+def add_output_region(plan: Dict[str, Any], name: str, size: int, **extra: Any) -> Dict[str, Any]:
+    if plan["output_regions"]:
+        raise ValueError("only one fixed model output region is supported")
+    item = region(name, cfg.OUTPUT_BASE_ADDR, size, **extra)
+    plan["output_regions"].append(item)
+    return item
+
+
+def add_model_output_or_runtime_region(
+    plan: Dict[str, Any],
+    name: str,
+    size: int,
+    *,
+    is_model_output: bool,
+    **extra: Any,
+) -> Dict[str, Any]:
+    if is_model_output and bool(getattr(cfg, "ENABLE_OUTPUT_ADDR", False)):
+        return add_output_region(plan, name, size, is_model_output=True, **extra)
+    return add_runtime_region(plan, name, size, **extra)
+
+
 def validate_no_overlap(a_start: int, a_size: int, b_start: int, b_size: int, a_name: str, b_name: str) -> None:
     a_end = a_start + a_size
     b_end = b_start + b_size
@@ -695,6 +716,8 @@ def plan_pool_unit(
     unit: Dict[str, Any],
     value_tensors: Dict[str, str],
     value_shapes: Dict[str, Dict[str, int]],
+    *,
+    is_model_output: bool,
 ) -> None:
     layer_name = unit["layer"]
     _, input_tensor_name, input_shape = require_input_value(unit, value_tensors, value_shapes)
@@ -706,10 +729,11 @@ def plan_pool_unit(
     pool_storage_h, pool_storage_w = runtime_storage_hw(pool_out_h, pool_out_w)
     pool_output_size = pool_storage_h * pool_storage_w * pool_channels
     tensor_name = f"{layer_name}_out"
-    runtime = add_runtime_region(
+    runtime = add_model_output_or_runtime_region(
         plan,
         tensor_name,
         pool_output_size,
+        is_model_output=is_model_output,
         channels=pool_channels,
         aligned_channels=pool_channels,
         shape_nchw=[1, pool_channels, pool_out_h, pool_out_w],
@@ -752,6 +776,8 @@ def plan_linear_unit(
     unit: Dict[str, Any],
     value_tensors: Dict[str, str],
     value_shapes: Dict[str, Dict[str, int]],
+    *,
+    is_model_output: bool,
 ) -> None:
     layer_name = unit["layer"]
     linear_index = int(unit["linear_index"])
@@ -787,10 +813,11 @@ def plan_linear_unit(
     output_size = out_features
 
     params = add_init_region(plan, f"{layer_name}_params", parameter_size, f"coe/{layer_name}_params.coe")
-    output_tensor = add_runtime_region(
+    output_tensor = add_model_output_or_runtime_region(
         plan,
         f"{layer_name}_out",
         output_size,
+        is_model_output=is_model_output,
         channels=out_features,
         aligned_channels=out_features,
         shape=[out_features],
@@ -913,6 +940,8 @@ def plan_conv_unit(
     unit: Dict[str, Any],
     value_tensors: Dict[str, str],
     value_shapes: Dict[str, Dict[str, int]],
+    *,
+    is_model_output: bool,
 ) -> None:
     idx = unit["layer_index"]
     conv = unit["conv"]
@@ -993,12 +1022,14 @@ def plan_conv_unit(
     if has_relu:
         runtime_specs.append(("relu", output_size, out_h, out_w, output_storage_h, output_storage_w))
 
+    final_runtime_op = "relu" if has_relu else "dsmp" if needs_dsmp else "conv"
     for op_name, region_size, region_h, region_w, storage_h, storage_w in runtime_specs:
         tensor_name = f"{layer_name}_{op_name}_out"
-        runtime = add_runtime_region(
+        runtime = add_model_output_or_runtime_region(
             plan,
             tensor_name,
             region_size,
+            is_model_output=is_model_output and op_name == final_runtime_op,
             channels=out_ch,
             aligned_channels=aligned_out_ch,
             shape_nchw=[1, out_ch, region_h, region_w],
@@ -1108,6 +1139,14 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
     input_storage_shape = [1, image_aligned_ch, input_storage_h, input_storage_w]
 
     runtime_limit_addr = getattr(cfg, "RUNTIME_LIMIT_ADDR", 0xFFFFFFFF)
+    enable_output_addr = bool(getattr(cfg, "ENABLE_OUTPUT_ADDR", False))
+    output_base_addr = int(getattr(cfg, "OUTPUT_BASE_ADDR", 0))
+    output_limit_addr = int(getattr(cfg, "OUTPUT_LIMIT_ADDR", 0))
+    if enable_output_addr and output_base_addr >= output_limit_addr:
+        raise ValueError(
+            f"OUTPUT_BASE_ADDR must be less than OUTPUT_LIMIT_ADDR when ENABLE_OUTPUT_ADDR=True: "
+            f"base={hex_addr(output_base_addr)}, limit={hex_addr(output_limit_addr)}"
+        )
 
     plan: Dict[str, Any] = {
         "config": {
@@ -1115,6 +1154,9 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
             "INIT_LIMIT_ADDR": hex_addr(cfg.INIT_LIMIT_ADDR),
             "RUNTIME_BASE_ADDR": hex_addr(cfg.RUNTIME_BASE_ADDR),
             "RUNTIME_LIMIT_ADDR": hex_addr(runtime_limit_addr),
+            "ENABLE_OUTPUT_ADDR": enable_output_addr,
+            "OUTPUT_BASE_ADDR": hex_addr(output_base_addr),
+            "OUTPUT_LIMIT_ADDR": hex_addr(output_limit_addr),
             "IMAGE_BASE_ADDR": hex_addr(cfg.IMAGE_BASE_ADDR),
             "IMAGE_SOURCE": cfg.IMAGE_SOURCE,
             "IMAGE_PATH": image_file,
@@ -1148,6 +1190,7 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
         "execution_plan": [],
         "init_regions": [],
         "runtime_regions": [],
+        "output_regions": [],
         "_next_init_addr": cfg.INIT_BASE_ADDR,
         "_next_runtime_addr": cfg.RUNTIME_BASE_ADDR,
     }
@@ -1169,11 +1212,11 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
         image_aligned_ch=image_aligned_ch,
     )
 
-    for unit in units:
+    for unit_index, unit in enumerate(units):
         planner = UNIT_PLANNERS.get(unit["op_type"])
         if planner is None:
             raise ValueError(f"unsupported execution unit type: {unit['op_type']}")
-        planner(plan, unit, value_tensors, value_shapes)
+        planner(plan, unit, value_tensors, value_shapes, is_model_output=unit_index == len(units) - 1)
 
     instr_size = instr_count_for_execution_plan(plan["execution_plan"]) * cfg.INSTR_WORD_BYTES
     instr = add_init_region(plan, "instr", instr_size, "coe/instr.coe")
@@ -1189,10 +1232,38 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
         raise ValueError(
             f"runtime region exceeds RUNTIME_LIMIT_ADDR: next={hex_addr(runtime_end)}, limit={hex_addr(runtime_limit_addr)}"
         )
+    output_end = output_base_addr
+    if enable_output_addr:
+        if len(plan["output_regions"]) != 1:
+            raise ValueError("ENABLE_OUTPUT_ADDR=True but no model output region was generated")
+        output_region = plan["output_regions"][0]
+        output_end = addr_to_int(output_region["end_addr_exclusive"])
+        if output_end > output_limit_addr:
+            raise ValueError(
+                f"model output exceeds OUTPUT_LIMIT_ADDR: next={hex_addr(output_end)}, "
+                f"limit={hex_addr(output_limit_addr)}"
+            )
     if cfg.RUNTIME_BASE_ADDR < cfg.INIT_LIMIT_ADDR:
         raise ValueError(
             f"RUNTIME_BASE_ADDR {hex_addr(cfg.RUNTIME_BASE_ADDR)} overlaps init address window "
             f"ending at {hex_addr(cfg.INIT_LIMIT_ADDR)}"
+        )
+    if enable_output_addr:
+        validate_no_overlap(
+            output_base_addr,
+            output_end - output_base_addr,
+            cfg.INIT_BASE_ADDR,
+            init_end - cfg.INIT_BASE_ADDR,
+            "model output",
+            "init data",
+        )
+        validate_no_overlap(
+            output_base_addr,
+            output_end - output_base_addr,
+            cfg.RUNTIME_BASE_ADDR,
+            runtime_end - cfg.RUNTIME_BASE_ADDR,
+            "model output",
+            "runtime data",
         )
 
     if cfg.IMAGE_SOURCE == "external":
@@ -1212,9 +1283,19 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
             "external input",
             "runtime data",
         )
+        if enable_output_addr:
+            validate_no_overlap(
+                cfg.IMAGE_BASE_ADDR,
+                image_size,
+                output_base_addr,
+                output_end - output_base_addr,
+                "external input",
+                "model output",
+            )
 
     plan["init_end_addr_exclusive"] = hex_addr(init_end)
     plan["runtime_end_addr_exclusive"] = hex_addr(runtime_end)
+    plan["output_end_addr_exclusive"] = hex_addr(output_end) if enable_output_addr else None
     del plan["_next_init_addr"]
     del plan["_next_runtime_addr"]
     return plan
@@ -1234,10 +1315,9 @@ def main() -> None:
     print(f"     layers      = {len(plan['model_layers'])}")
     print(f"     init_end    = {plan['init_end_addr_exclusive']}")
     print(f"     runtime_end = {plan['runtime_end_addr_exclusive']}")
+    if plan.get("output_end_addr_exclusive") is not None:
+        print(f"     output_end  = {plan['output_end_addr_exclusive']}")
 
 
 if __name__ == "__main__":
     main()
-
-
-

@@ -46,14 +46,14 @@ IMAGE_SOURCE="external" -> layer/linear params
 
 ## 4. 端序约定
 
-参数和 image COE 按现有 `merge.py` 规则导出为 little-endian byte：
+所有 COE word 都按 little-endian byte 导出：每个 32-bit word 的最低有效字节放在最低地址。
 
 ```text
 00000010 -> 10 00 00 00
 ```
 
-指令 COE 按指令 word 显示顺序导出：
+指令 COE 也采用同样规则：
 
 ```text
-04200000 -> 04 20 00 00
+04202000 -> 00 20 20 04
 ```

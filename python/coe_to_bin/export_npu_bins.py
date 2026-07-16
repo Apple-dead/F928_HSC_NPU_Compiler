@@ -8,8 +8,8 @@ an extra export stage for DDR loading:
   target/npu_params.bin = init regions from INIT_BASE_ADDR up to, but excluding, instr
   target/npu_instr.bin  = instr region only
 
-Parameter/image regions use the same little-endian word interpretation as
-merge.py. Instruction COE is exported in displayed instruction-word order.
+All COE regions are exported with little-endian word interpretation: the least
+significant byte of each 32-bit COE word is placed at the lowest address.
 """
 
 from __future__ import annotations
@@ -170,7 +170,7 @@ def export_instr_bin(*, instr_region: dict, coe_base_dir: Path) -> bytes:
     if not file_text:
         raise ValueError("instr region is missing file")
     coe_path = resolve_plan_file(str(file_text), coe_base_dir)
-    data = coe_to_bytes(coe_path, word_bytes=4, word_endian="big")
+    data = coe_to_bytes(coe_path, word_bytes=4, word_endian="little")
     expected_size = int(instr_region["size_bytes"])
     if len(data) != expected_size:
         raise ValueError(

@@ -51,6 +51,9 @@ INIT_BASE_ADDR
 INIT_LIMIT_ADDR
 RUNTIME_BASE_ADDR
 RUNTIME_LIMIT_ADDR
+ENABLE_OUTPUT_ADDR
+OUTPUT_BASE_ADDR
+OUTPUT_LIMIT_ADDR
 IMAGE_BASE_ADDR
 IMAGE_SOURCE
 IMAGE_PATH
@@ -64,7 +67,9 @@ INFER_PARSE_OP_LIMIT
 CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD
 ```
 
-`RUNTIME_LIMIT_ADDR` 是 runtime feature/output 区的半开上限，memory plan 会检查 `runtime_end_addr_exclusive <= RUNTIME_LIMIT_ADDR`。
+`ENABLE_OUTPUT_ADDR = False` 时，最终输出仍按原逻辑从 runtime 区分配，`RUNTIME_LIMIT_ADDR` 是 runtime feature/output 区的半开上限，memory plan 会检查 `runtime_end_addr_exclusive <= RUNTIME_LIMIT_ADDR`。
+
+`ENABLE_OUTPUT_ADDR = True` 时，最后一次计算的模型输出强制放到 `OUTPUT_BASE_ADDR`，并检查 `output_end_addr_exclusive <= OUTPUT_LIMIT_ADDR`；此时 `RUNTIME_LIMIT_ADDR` 只约束最后一次计算之前的中间 runtime 数据。
 
 `INPUT_HEIGHT` / `INPUT_WIDTH` 只作为 PT2 输入 shape metadata 缺失时的 fallback。正常情况下，输入尺寸和通道数来自 `data/model_ir.json`，而 `data/model_ir.json` 的 input 字段来自 PT2 graph metadata；只要 PT2 中存在该 metadata，memory plan 就不会使用 `INPUT_HEIGHT` / `INPUT_WIDTH`。
 
