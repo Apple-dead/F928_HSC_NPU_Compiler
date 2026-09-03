@@ -88,12 +88,12 @@ addr
 channels
 aligned_channels
 shape_nchw
-storage_shape_nchw
+aligned_shape_nchw
 size_bytes
 file
 ```
 
-`IMAGE_SOURCE = "coe"` 时，脚本会校验 `IMAGE_PATH` 指向的 COE 文件的 32-bit word 数是否等于 `image.size_bytes / 4`。输入 feature map 的逻辑尺寸来自 IR；物理存储尺寸会按至少 `8x8` 且 H/W 为 8 的倍数预留。
+`IMAGE_SOURCE = "coe"` 时，脚本会校验 `IMAGE_PATH` 指向的 COE 文件的 32-bit word 数是否等于 `image.size_bytes / 4`。输入 feature map 的 H/W 尺寸来自 IR，并按实际大小预留；不会补零到 8 的倍数。`aligned_shape_nchw` 只表示通道按 4 对齐后的形状，H/W 与 `shape_nchw` 相同。
 
 ### model_ops
 
@@ -174,9 +174,7 @@ input_channels
 output_channels
 kernel_size
 input_hw
-logical_conv_output_hw
 conv_output_hw
-logical_output_hw
 output_hw
 has_bias
 has_relu
@@ -215,27 +213,29 @@ generate_instr.py 只生成 CONV 和 END
 - 数据按 4 通道对齐。
 - 单次 NPU pass 最多处理 8 个输出通道。
 - 大 feature map 层可按 4 通道 group 拆分。
-- conv 输入通道数当前最大支持 256。
-- 输入和运行时 feature map 最小按 `8x8` 预留，且 H/W 按 8 对齐。
-- 后端 H/W 传播采用 NPU 物理执行语义：每层使用上一层的物理 storage H/W 作为本层有效输入边长来计算输出 H/W；本层输出 H/W 再向上对齐到 8 的倍数作为下一层 storage H/W。
+- conv 输入通道数当前最大支持 1024。
+- 所有参与编译的 feature map H/W 都按实际矩阵大小规划和配置，不再把 H/W 换算成 `/8` 后的块数，也不会把非 8 倍数输出补零为下一层有效输入尺寸。
+- 后端 H/W 传播采用实际尺寸语义：例如 CONV 输出为 `13x13` 时，下一次 CONV/AVGPOOL/MAXPOOL/ReLU/DSMP 直接按 `13x13` 看待并给到 NPU。
 - `stride=1` 规划为 `conv -> relu`。
 - `stride=2,padding=0` 规划为 `conv(stride=1) -> dsmp -> relu`。
-- DSMP 的输入和输出都按物理边长处理；例如输入 storage 为 `40x40` 时，DSMP 输出 H/W 为 `20x20`，再按 8 对齐为 storage。DSMP/ReLU 的通道数按实际输入通道数配置，范围为 1 到 256，不再按 conv group 拆分。
+- DSMP 的输入和输出按实际矩阵边长处理；例如输入为 `13x13` 时，DSMP 输出 H/W 为 `6x6`，下一层按实际 `6x6` 配置。DSMP 的通道数按实际输入通道数配置，范围为 1 到 1024，不再按 conv group 拆分。
 - `stride>2` 或 `stride=2,padding!=0` 会报错。
+- AVGPOOL/MAXPOOL 仅支持 `stride=[1,1]` 或 `stride=[2,2]`，并分别写入 RAVGPOOL/RMAXPOOL 的 step 字段：`stride=[1,1] -> step=0`，`stride=[2,2] -> step=1`。
+- AVGPOOL/MAXPOOL 不做任何 H/W 补零，输出 H/W 按普通 2x2、padding=0 池化公式规划：`out = floor((in - 2) / stride) + 1`。因此 `stride=[1,1]` 时输出为输入 H/W 各减 1，`stride=[2,2]` 时输出为普通 2 倍下采样结果。
 
 ## 9. Linear / FULL 规划规则
 
 当前 memory plan 支持 `linear`，并将其规划为 `op_type = "linear"` 的 execution stage。`flatten` 已在前端透传，不会进入 `model_ir.json` 和 `memory_plan.json`。
 
-规划时会读取上一层输出的逻辑 shape 与物理 storage shape：
+规划时会读取上一层输出的实际 shape 与通道对齐信息：
 
 ```text
-逻辑输入特征数 = channels * height * width
-FULL 输入字节数 = aligned_channels * storage_height * storage_width
+实际输入特征数 = channels * height * width
+FULL 输入字节数 = aligned_channels * height * width
 FULL 输入字数 = FULL 输入字节数 / 4
 ```
 
-`linear.in_features` 必须不大于后端有效输入特征数；若超过则 memory plan 阶段报错。参数区大小按物理 storage footprint 计算，原始 `in_features` 之外的位置由 `linear_params_to_bram_coe.py` 补 0 权重：
+`linear.in_features` 必须不大于后端实际输入特征数；若超过则 memory plan 阶段报错。参数区大小按实际 H/W 和通道对齐后的 footprint 计算，原始 `in_features` 之外的位置由 `linear_params_to_bram_coe.py` 补 0 权重；不会因为 H/W 对齐额外补行或补列：
 
 ```text
 linearN_params.size = out_features * (FULL 输入字节数 + optional int32 bias)

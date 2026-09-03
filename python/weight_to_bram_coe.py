@@ -94,8 +94,8 @@ def convert_weights(
     kernel_h: int,
     kernel_w: int,
 ) -> tuple[List[int], int, int]:
-    if in_ch > 256:
-        raise NotImplementedError("conv input channels > 256 are not supported by current NPU.")
+    if in_ch > 1024:
+        raise NotImplementedError("conv input channels > 1024 are not supported by current RCONV1.")
 
     expected = out_ch * in_ch * kernel_h * kernel_w
     if flat_values.size != expected:

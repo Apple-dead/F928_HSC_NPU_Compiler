@@ -16,7 +16,6 @@ from frontend.ir_schema import BACKEND_SUPPORTED_OPS
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUT_PATH = PROJECT_ROOT / "data" / "memory_plan.json"
 DEFAULT_MODEL_IR = PROJECT_ROOT / "data" / "model_ir.json"
-MIN_RUNTIME_FEATURE_HW = 8
 
 
 def resolve_project_path(path_text: str) -> Path:
@@ -104,8 +103,9 @@ def feature_map_elements(height: int, width: int, channels: int) -> int:
     return height * width * channels
 
 
-def runtime_storage_hw(height: int, width: int) -> tuple[int, int]:
-    return align_up(max(height, MIN_RUNTIME_FEATURE_HW), 8), align_up(max(width, MIN_RUNTIME_FEATURE_HW), 8)
+def validate_feature_hw(height: int, width: int) -> None:
+    if height <= 0 or width <= 0:
+        raise ValueError(f"feature HW must be positive, got {height}x{width}")
 
 
 def conv_output_hw(height: int, width: int, conv: Dict[str, Any]) -> tuple[int, int]:
@@ -148,15 +148,15 @@ def instr_count_for_execution_plan(execution_plan: List[Dict[str, Any]]) -> int:
         if stage.get("op_type", "conv") == "conv":
             for split in stage.get("splits", []):
                 if "conv" in split:
-                    total += 9
+                    total += 11
             if "dsmp" in stage:
-                total += 6
+                total += 7
             if "relu" in stage:
                 total += 7
             continue
         for split in stage.get("splits", []):
             if "pool" in split:
-                total += 6
+                total += 7 if stage.get("op_type") in ("avgpool", "maxpool") else 6
     return total
 
 
@@ -176,7 +176,7 @@ def layer_needs_dsmp(conv: Dict[str, Any]) -> bool:
     return False
 
 
-def pool_output_hw(height: int, width: int, pool: Dict[str, Any]) -> tuple[int, int]:
+def pool_output_hw(height: int, width: int, pool: Dict[str, Any], *, op_type: str) -> tuple[int, int]:
     kh, kw = pool["kernel_size"]
     sh, sw = pool["stride"]
     ph, pw = pool["padding"]
@@ -184,7 +184,10 @@ def pool_output_hw(height: int, width: int, pool: Dict[str, Any]) -> tuple[int, 
     ceil_mode = bool(pool.get("ceil_mode", False))
     if [kh, kw] != [2, 2]:
         raise ValueError(f"pool only supports kernel_size=[2, 2], got {[kh, kw]}")
-    if [sh, sw] != [2, 2]:
+    if op_type in ("avgpool", "maxpool"):
+        if sh != sw or sh not in (1, 2):
+            raise ValueError(f"{op_type} only supports square stride 1 or 2, got {[sh, sw]}")
+    elif [sh, sw] != [2, 2]:
         raise ValueError(f"pool only supports stride=[2, 2], got {[sh, sw]}")
     if [ph, pw] != [0, 0]:
         raise ValueError(f"pool only supports padding=[0, 0], got {[ph, pw]}")
@@ -234,6 +237,8 @@ def build_layer_execution_plan(
     aligned_out_ch: int,
     kh: int,
     kw: int,
+    padding: List[int],
+    stride: List[int],
     input_h: int,
     input_w: int,
     out_h: int,
@@ -247,26 +252,22 @@ def build_layer_execution_plan(
     relu_out_tensor: Dict[str, Any] | None,
     conv_out_h: int,
     conv_out_w: int,
-    conv_storage_h: int,
-    conv_storage_w: int,
-    output_storage_h: int,
-    output_storage_w: int,
 ) -> Dict[str, Any]:
-    if in_ch > 256:
-        raise NotImplementedError(f"{layer_name}: conv input channels > 256 are not supported by current NPU.")
+    if in_ch > 1024:
+        raise NotImplementedError(f"{layer_name}: conv input channels > 1024 are not supported by current RCONV1.")
 
     bytes_per_weight_output_channel = aligned_in_ch * kh * kw
-    bytes_per_conv_feature_channel = conv_storage_h * conv_storage_w
-    bytes_per_feature_channel = output_storage_h * output_storage_w
+    bytes_per_conv_feature_channel = conv_out_h * conv_out_w
+    bytes_per_feature_channel = out_h * out_w
     has_dsmp = dsmp_out_tensor is not None
     input_feature_elements = feature_map_elements(input_h, input_w, aligned_in_ch)
-    output_feature_elements = feature_map_elements(output_storage_h, output_storage_w, aligned_out_ch)
+    output_feature_elements = feature_map_elements(out_h, out_w, aligned_out_ch)
     max_group_channels = channel_group_max_channels(
         input_h=input_h,
         input_w=input_w,
         aligned_in_ch=aligned_in_ch,
-        output_h=output_storage_h,
-        output_w=output_storage_w,
+        output_h=out_h,
+        output_w=out_w,
         aligned_out_ch=aligned_out_ch,
     )
     splits: List[Dict[str, Any]] = []
@@ -331,15 +332,14 @@ def build_layer_execution_plan(
         "aligned_input_channels": aligned_in_ch,
         "aligned_output_channels": aligned_out_ch,
         "kernel_size": [kh, kw],
+        "padding": padding,
+        "stride": stride,
         "has_bias": has_bias,
         "has_relu": has_relu,
         "input_hw": [input_h, input_w],
-        "logical_conv_output_hw": [conv_out_h, conv_out_w],
-        "conv_output_hw": [conv_storage_h, conv_storage_w],
+        "conv_output_hw": [conv_out_h, conv_out_w],
         "has_dsmp": has_dsmp,
-        "logical_output_hw": [out_h, out_w],
-        "output_hw": [output_storage_h, output_storage_w],
-        "minimum_runtime_feature_hw": MIN_RUNTIME_FEATURE_HW,
+        "output_hw": [out_h, out_w],
         "reserved_regions": {
             "conv_out": {
                 "addr": conv_out_tensor["addr"],
@@ -372,13 +372,19 @@ def build_layer_execution_plan(
         "splits": splits,
     }
     if has_dsmp:
-        if conv_storage_h != conv_storage_w:
-            raise ValueError(f"{layer_name}: dsmp input storage HW must be square, got {conv_storage_h}x{conv_storage_w}")
+        if conv_out_h != conv_out_w:
+            raise ValueError(f"{layer_name}: dsmp input HW must be square, got {conv_out_h}x{conv_out_w}")
+        if conv_out_w > 1024:
+            raise NotImplementedError(
+                f"{layer_name}: dsmp feature size > 1024 is not supported by current RDSMP."
+            )
+        if out_ch > 1024:
+            raise NotImplementedError(f"{layer_name}: dsmp input channels > 1024 are not supported by current RDSMP.")
         layer_plan["dsmp"] = {
             "input_addr": conv_out_tensor["addr"],
             "output_addr": dsmp_out_tensor["addr"],
-            "input_storage_hw": [conv_storage_h, conv_storage_w],
-            "block_image": conv_storage_h // 8,
+            "input_hw": [conv_out_h, conv_out_w],
+            "feature_size": conv_out_w,
             "channels": out_ch,
         }
         relu_input_addr = dsmp_out_tensor["addr"]
@@ -388,7 +394,7 @@ def build_layer_execution_plan(
         layer_plan["relu"] = {
             "input_addr": relu_input_addr,
             "output_addr": relu_out_tensor["addr"],
-            "feature_size": output_storage_w,
+            "feature_size": out_w,
             "channels": out_ch,
         }
     return layer_plan
@@ -399,34 +405,34 @@ def build_pool_execution_plan(
     op_name: str,
     layer_name: str,
     input_channels: int,
+    aligned_input_channels: int,
     input_h: int,
     input_w: int,
     output_h: int,
     output_w: int,
-    output_storage_h: int,
-    output_storage_w: int,
     input_tensor: Dict[str, Any],
     output_tensor: Dict[str, Any],
     pool: Dict[str, Any],
 ) -> Dict[str, Any]:
-    if input_h % 8 != 0 or input_w % 8 != 0:
-        raise ValueError(f"{layer_name}: pool input storage HW must be divisible by 8, got {input_h}x{input_w}")
-    if output_storage_h % 8 != 0 or output_storage_w % 8 != 0:
-        raise ValueError(
-            f"{layer_name}: pool output storage HW must be divisible by 8, got {output_storage_h}x{output_storage_w}"
+    if op_name in ("avgpool", "maxpool") and input_channels > 1024:
+        raise NotImplementedError(
+            f"{layer_name}: {op_name} input channels > 1024 are not supported by current register format."
         )
-    if input_channels % 4 != 0:
-        raise ValueError(f"{layer_name}: pool input storage channels must be a multiple of 4, got {input_channels}")
+    if aligned_input_channels % 4 != 0:
+        raise ValueError(
+            f"{layer_name}: pool input aligned channels must be a multiple of 4, got {aligned_input_channels}"
+        )
 
-    input_size = input_channels * input_h * input_w
-    output_size = input_channels * output_storage_h * output_storage_w
+    input_size = aligned_input_channels * input_h * input_w
+    output_size = aligned_input_channels * output_h * output_w
     splits: List[Dict[str, Any]] = [
         {
             "group_index": 0,
             "start_channel": 0,
             "channels": input_channels,
             "valid_channels": input_channels,
-            "has_padding": False,
+            "aligned_channels": aligned_input_channels,
+            "has_padding": aligned_input_channels != input_channels,
             "offsets_bytes": {
                 "input": 0,
                 "output": 0,
@@ -440,6 +446,7 @@ def build_pool_execution_plan(
                 "output_addr": output_tensor["addr"],
                 "feature_size": input_w,
                 "channels": input_channels,
+                "stride": pool["stride"],
             },
         }
     ]
@@ -451,15 +458,13 @@ def build_pool_execution_plan(
         "pool_channel_unit": "all_input_channels",
         "input_channels": input_channels,
         "output_channels": input_channels,
-        "aligned_input_channels": input_channels,
-        "aligned_output_channels": input_channels,
+        "aligned_input_channels": aligned_input_channels,
+        "aligned_output_channels": aligned_input_channels,
         "kernel_size": pool["kernel_size"],
         "stride": pool["stride"],
         "padding": pool["padding"],
         "input_hw": [input_h, input_w],
-        "logical_output_hw": [output_h, output_w],
-        "output_hw": [output_storage_h, output_storage_w],
-        "minimum_runtime_feature_hw": MIN_RUNTIME_FEATURE_HW,
+        "output_hw": [output_h, output_w],
         "reserved_regions": {
             "pool_out": {
                 "addr": output_tensor["addr"],
@@ -470,7 +475,7 @@ def build_pool_execution_plan(
         "splits": splits,
     }
 
-def validate_input_coe_size(file_text: str, expected_size: int, input_shape: List[int]) -> None:
+def validate_input_coe_size(file_text: str, expected_size: int, expected_shape: List[int]) -> None:
     path = resolve_project_path(file_text)
     if not path.is_file():
         raise FileNotFoundError(f"input COE not found: {path}")
@@ -480,7 +485,7 @@ def validate_input_coe_size(file_text: str, expected_size: int, input_shape: Lis
         raise ValueError(
             f"{path}: input COE size mismatch for start-layer input; "
             f"file has {actual_size} bytes ({len(values)} 32-bit words), "
-            f"expected {expected_size} bytes for storage_shape_nchw={input_shape}"
+            f"expected {expected_size} bytes for aligned_shape_nchw={expected_shape}"
         )
 
 
@@ -629,16 +634,12 @@ def make_value_shape(
     *,
     height: int,
     width: int,
-    storage_height: int,
-    storage_width: int,
     channels: int,
     aligned_channels: int,
 ) -> Dict[str, int]:
     return {
         "height": height,
         "width": width,
-        "storage_height": storage_height,
-        "storage_width": storage_width,
         "channels": channels,
         "aligned_channels": aligned_channels,
     }
@@ -652,8 +653,6 @@ def register_value(
     *,
     height: int,
     width: int,
-    storage_height: int,
-    storage_width: int,
     channels: int,
     aligned_channels: int,
 ) -> None:
@@ -664,8 +663,6 @@ def register_value(
     value_shapes[key] = make_value_shape(
         height=height,
         width=width,
-        storage_height=storage_height,
-        storage_width=storage_width,
         channels=channels,
         aligned_channels=aligned_channels,
     )
@@ -688,8 +685,6 @@ def init_value_maps(
     input_h: int,
     input_w: int,
     input_ch: int,
-    input_storage_h: int,
-    input_storage_w: int,
     image_aligned_ch: int,
 ) -> tuple[Dict[str, str], Dict[str, Dict[str, int]]]:
     value_tensors: Dict[str, str] = {}
@@ -703,8 +698,6 @@ def init_value_maps(
             "image",
             height=input_h,
             width=input_w,
-            storage_height=input_storage_h,
-            storage_width=input_storage_w,
             channels=input_ch,
             aligned_channels=image_aligned_ch,
         )
@@ -722,36 +715,35 @@ def plan_pool_unit(
     layer_name = unit["layer"]
     _, input_tensor_name, input_shape = require_input_value(unit, value_tensors, value_shapes)
     input_tensor_info = plan["tensors"][input_tensor_name]
-    pool_input_storage_h = int(input_shape["storage_height"])
-    pool_input_storage_w = int(input_shape["storage_width"])
-    pool_channels = int(input_shape["aligned_channels"])
-    pool_out_h, pool_out_w = pool_output_hw(pool_input_storage_h, pool_input_storage_w, unit["pool"])
-    pool_storage_h, pool_storage_w = runtime_storage_hw(pool_out_h, pool_out_w)
-    pool_output_size = pool_storage_h * pool_storage_w * pool_channels
+    input_h = int(input_shape["height"])
+    input_w = int(input_shape["width"])
+    input_channels = int(input_shape["channels"])
+    aligned_input_ch = int(input_shape["aligned_channels"])
+    validate_feature_hw(input_h, input_w)
+    pool_out_h, pool_out_w = pool_output_hw(input_h, input_w, unit["pool"], op_type=unit["op_type"])
+    pool_output_size = pool_out_h * pool_out_w * aligned_input_ch
     tensor_name = f"{layer_name}_out"
     runtime = add_model_output_or_runtime_region(
         plan,
         tensor_name,
         pool_output_size,
         is_model_output=is_model_output,
-        channels=pool_channels,
-        aligned_channels=pool_channels,
-        shape_nchw=[1, pool_channels, pool_out_h, pool_out_w],
-        storage_shape_nchw=[1, pool_channels, pool_storage_h, pool_storage_w],
-        minimum_runtime_feature_hw=MIN_RUNTIME_FEATURE_HW,
+        channels=input_channels,
+        aligned_channels=aligned_input_ch,
+        shape_nchw=[1, input_channels, pool_out_h, pool_out_w],
+        aligned_shape_nchw=[1, aligned_input_ch, pool_out_h, pool_out_w],
     )
     plan["tensors"][tensor_name] = runtime
     plan["execution_plan"].append(
         build_pool_execution_plan(
             op_name=unit["op_type"],
             layer_name=layer_name,
-            input_channels=pool_channels,
-            input_h=pool_input_storage_h,
-            input_w=pool_input_storage_w,
+            input_channels=input_channels,
+            aligned_input_channels=aligned_input_ch,
+            input_h=input_h,
+            input_w=input_w,
             output_h=pool_out_h,
             output_w=pool_out_w,
-            output_storage_h=pool_storage_h,
-            output_storage_w=pool_storage_w,
             input_tensor=input_tensor_info,
             output_tensor=runtime,
             pool=unit["pool"],
@@ -764,10 +756,8 @@ def plan_pool_unit(
         tensor_name,
         height=pool_out_h,
         width=pool_out_w,
-        storage_height=pool_storage_h,
-        storage_width=pool_storage_w,
-        channels=pool_channels,
-        aligned_channels=pool_channels,
+        channels=input_channels,
+        aligned_channels=aligned_input_ch,
     )
 
 
@@ -788,8 +778,6 @@ def plan_linear_unit(
     input_w = int(input_shape["width"])
     input_ch = int(input_shape["channels"])
     aligned_input_ch = int(input_shape["aligned_channels"])
-    input_storage_h = int(input_shape["storage_height"])
-    input_storage_w = int(input_shape["storage_width"])
     in_features = int(unit["in_features"])
     out_features = int(unit["out_features"])
     max_in_features = input_ch * input_h * input_w
@@ -799,16 +787,16 @@ def plan_linear_unit(
             f"{input_ch}x{input_h}x{input_w}={max_in_features}"
         )
 
-    input_storage_bytes = aligned_input_ch * input_storage_h * input_storage_w
-    if input_storage_bytes % 4 != 0:
-        raise ValueError(f"{layer_name}: FULL input byte count must be divisible by 4, got {input_storage_bytes}")
-    input_words = input_storage_bytes // 4
+    input_bytes = aligned_input_ch * input_h * input_w
+    if input_bytes % 4 != 0:
+        raise ValueError(f"{layer_name}: FULL input byte count must be divisible by 4, got {input_bytes}")
+    input_words = input_bytes // 4
     if not 1 <= input_words <= 65536:
         raise ValueError(f"{layer_name}: FULL input words must be in [1, 65536], got {input_words}")
 
     has_bias = bool(unit.get("has_bias", False))
     bias_bytes_per_output = 4 if has_bias else 0
-    bytes_per_output_params = input_storage_bytes + bias_bytes_per_output
+    bytes_per_output_params = input_bytes + bias_bytes_per_output
     parameter_size = out_features * bytes_per_output_params
     output_size = out_features
 
@@ -821,7 +809,6 @@ def plan_linear_unit(
         channels=out_features,
         aligned_channels=out_features,
         shape=[out_features],
-        storage_shape=[out_features],
         layout="signed_int8_linear_outputs_tightly_packed",
     )
 
@@ -829,10 +816,10 @@ def plan_linear_unit(
         "addr": params["addr"],
         "shape_oi": [out_features, in_features],
         "input_shape_nchw": [1, input_ch, input_h, input_w],
-        "input_storage_shape_nchw": [1, aligned_input_ch, input_storage_h, input_storage_w],
-        "size_bytes": out_features * input_storage_bytes,
+        "input_aligned_shape_nchw": [1, aligned_input_ch, input_h, input_w],
+        "size_bytes": out_features * input_bytes,
         "parameter_region": f"{layer_name}_params",
-        "layout": "per_output_4channel_pixel_interleaved_with_zero_padding",
+        "layout": "per_output_4channel_pixel_interleaved",
     }
     if has_bias:
         plan["tensors"][f"{layer_name}_bias"] = {
@@ -870,16 +857,14 @@ def plan_linear_unit(
                 "start_channel": 0,
                 "channels": aligned_input_ch,
                 "valid_channels": input_ch,
-                "has_padding": aligned_input_ch != input_ch
-                or input_storage_h != input_h
-                or input_storage_w != input_w,
+                "has_padding": aligned_input_ch != input_ch,
                 "offsets_bytes": {
                     "weight": param_offset,
-                    "bias": param_offset + input_storage_bytes if has_bias else None,
+                    "bias": param_offset + input_bytes if has_bias else None,
                     "output": output_offset,
                 },
                 "size_bytes": {
-                    "weight": input_storage_bytes,
+                    "weight": input_bytes,
                     "bias": bias_bytes_per_output,
                     "output": 1,
                 },
@@ -906,8 +891,7 @@ def plan_linear_unit(
             "input_channels": input_ch,
             "aligned_input_channels": aligned_input_ch,
             "input_hw": [input_h, input_w],
-            "input_storage_hw": [input_storage_h, input_storage_w],
-            "input_storage_bytes": input_storage_bytes,
+            "input_bytes": input_bytes,
             "input_words": input_words,
             "has_bias": has_bias,
             "output_layout": "signed_int8_tightly_packed",
@@ -928,8 +912,6 @@ def plan_linear_unit(
         f"{layer_name}_out",
         height=1,
         width=out_features,
-        storage_height=1,
-        storage_width=out_features,
         channels=1,
         aligned_channels=1,
     )
@@ -948,8 +930,9 @@ def plan_conv_unit(
     has_relu = bool(unit.get("has_relu", False))
     layer_name = f"layer{idx}"
     _, input_tensor_name, input_shape = require_input_value(unit, value_tensors, value_shapes)
-    height = int(input_shape["storage_height"])
-    width = int(input_shape["storage_width"])
+    height = int(input_shape["height"])
+    width = int(input_shape["width"])
+    validate_feature_hw(height, width)
     in_ch = conv["in_channels"]
     out_ch = conv["out_channels"]
     if in_ch != int(input_shape["channels"]):
@@ -968,15 +951,15 @@ def plan_conv_unit(
     else:
         out_h, out_w = conv_output_hw(height, width, conv)
         conv_out_h, conv_out_w = out_h, out_w
-    conv_storage_h, conv_storage_w = runtime_storage_hw(conv_out_h, conv_out_w)
-    output_storage_h, output_storage_w = runtime_storage_hw(out_h, out_w)
+    validate_feature_hw(conv_out_h, conv_out_w)
+    validate_feature_hw(out_h, out_w)
 
     weight_size = out_ch * aligned_in_ch * kh * kw
     has_bias = bool(conv.get("has_bias", False))
     bias_size = aligned_out_ch * 4 if has_bias else 0
     parameter_size = weight_size + bias_size
-    conv_output_size = conv_storage_h * conv_storage_w * aligned_out_ch
-    output_size = output_storage_h * output_storage_w * aligned_out_ch
+    conv_output_size = conv_out_h * conv_out_w * aligned_out_ch
+    output_size = out_h * out_w * aligned_out_ch
     params = add_init_region(plan, f"{layer_name}_params", parameter_size, f"coe/{layer_name}_params.coe")
 
     weight_tensor = {
@@ -1015,15 +998,15 @@ def plan_conv_unit(
 
     runtime_tensors: Dict[str, Dict[str, Any]] = {}
     runtime_specs = [
-        ("conv", conv_output_size, conv_out_h, conv_out_w, conv_storage_h, conv_storage_w),
+        ("conv", conv_output_size, conv_out_h, conv_out_w),
     ]
     if needs_dsmp:
-        runtime_specs.append(("dsmp", output_size, out_h, out_w, output_storage_h, output_storage_w))
+        runtime_specs.append(("dsmp", output_size, out_h, out_w))
     if has_relu:
-        runtime_specs.append(("relu", output_size, out_h, out_w, output_storage_h, output_storage_w))
+        runtime_specs.append(("relu", output_size, out_h, out_w))
 
     final_runtime_op = "relu" if has_relu else "dsmp" if needs_dsmp else "conv"
-    for op_name, region_size, region_h, region_w, storage_h, storage_w in runtime_specs:
+    for op_name, region_size, region_h, region_w in runtime_specs:
         tensor_name = f"{layer_name}_{op_name}_out"
         runtime = add_model_output_or_runtime_region(
             plan,
@@ -1033,8 +1016,7 @@ def plan_conv_unit(
             channels=out_ch,
             aligned_channels=aligned_out_ch,
             shape_nchw=[1, out_ch, region_h, region_w],
-            storage_shape_nchw=[1, aligned_out_ch, storage_h, storage_w],
-            minimum_runtime_feature_hw=MIN_RUNTIME_FEATURE_HW,
+            aligned_shape_nchw=[1, aligned_out_ch, region_h, region_w],
         )
         plan["tensors"][tensor_name] = runtime
         runtime_tensors[op_name] = runtime
@@ -1049,6 +1031,8 @@ def plan_conv_unit(
             aligned_out_ch=aligned_out_ch,
             kh=kh,
             kw=kw,
+            padding=conv["padding"],
+            stride=conv["stride"],
             input_h=height,
             input_w=width,
             out_h=out_h,
@@ -1062,10 +1046,6 @@ def plan_conv_unit(
             relu_out_tensor=runtime_tensors.get("relu"),
             conv_out_h=conv_out_h,
             conv_out_w=conv_out_w,
-            conv_storage_h=conv_storage_h,
-            conv_storage_w=conv_storage_w,
-            output_storage_h=output_storage_h,
-            output_storage_w=output_storage_w,
         )
     )
 
@@ -1078,8 +1058,6 @@ def plan_conv_unit(
             output_tensor_name,
             height=out_h,
             width=out_w,
-            storage_height=output_storage_h,
-            storage_width=output_storage_w,
             channels=out_ch,
             aligned_channels=aligned_out_ch,
         )
@@ -1095,8 +1073,6 @@ def plan_conv_unit(
         output_tensor_name,
         height=out_h,
         width=out_w,
-        storage_height=output_storage_h,
-        storage_width=output_storage_w,
         channels=out_ch,
         aligned_channels=aligned_out_ch,
     )
@@ -1132,11 +1108,11 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
         )
 
     image_aligned_ch = aligned_channels(input_ch)
-    input_storage_h, input_storage_w = runtime_storage_hw(input_h, input_w)
-    image_size = input_storage_h * input_storage_w * image_aligned_ch
+    validate_feature_hw(input_h, input_w)
+    image_size = input_h * input_w * image_aligned_ch
     image_file = getattr(cfg, "IMAGE_PATH", "./coe/image.coe") if cfg.IMAGE_SOURCE == "coe" else None
     image_addr = cfg.INIT_BASE_ADDR if cfg.IMAGE_SOURCE == "coe" else cfg.IMAGE_BASE_ADDR
-    input_storage_shape = [1, image_aligned_ch, input_storage_h, input_storage_w]
+    input_aligned_shape = [1, image_aligned_ch, input_h, input_w]
 
     runtime_limit_addr = getattr(cfg, "RUNTIME_LIMIT_ADDR", 0xFFFFFFFF)
     enable_output_addr = bool(getattr(cfg, "ENABLE_OUTPUT_ADDR", False))
@@ -1168,7 +1144,6 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
             "INFER_PARSE_MODE": cfg.INFER_PARSE_MODE,
             "INFER_PARSE_OP_LIMIT": cfg.INFER_PARSE_OP_LIMIT,
             "CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD": cfg.CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD,
-            "MIN_RUNTIME_FEATURE_HW": MIN_RUNTIME_FEATURE_HW,
             "model_ir": str(model_ir_path),
         },
         "relu": relu_cfg,
@@ -1180,7 +1155,7 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
             "channels": input_ch,
             "aligned_channels": image_aligned_ch,
             "shape_nchw": [1, input_ch, input_h, input_w],
-            "storage_shape_nchw": input_storage_shape,
+            "aligned_shape_nchw": input_aligned_shape,
             "size_bytes": image_size,
             "file": image_file,
         },
@@ -1198,7 +1173,7 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
     if cfg.IMAGE_SOURCE == "coe":
         if cfg.IMAGE_BASE_ADDR != cfg.INIT_BASE_ADDR:
             raise ValueError("IMAGE_SOURCE=coe currently requires IMAGE_BASE_ADDR == INIT_BASE_ADDR")
-        validate_input_coe_size(image_file, image_size, input_storage_shape)
+        validate_input_coe_size(image_file, image_size, input_aligned_shape)
         add_init_region(plan, "image", image_size, image_file)
     plan["tensors"]["image"] = plan["image"]
 
@@ -1207,8 +1182,6 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
         input_h=input_h,
         input_w=input_w,
         input_ch=input_ch,
-        input_storage_h=input_storage_h,
-        input_storage_w=input_storage_w,
         image_aligned_ch=image_aligned_ch,
     )
 

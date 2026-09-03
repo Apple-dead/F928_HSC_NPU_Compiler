@@ -19,18 +19,16 @@ def convert_linear_weights(
     input_height: int,
     input_width: int,
     aligned_input_channels: int,
-    input_storage_height: int,
-    input_storage_width: int,
 ) -> List[int]:
-    physical_logical_features = input_channels * input_height * input_width
-    expected_max = out_features * physical_logical_features
+    actual_features = input_channels * input_height * input_width
+    expected_max = out_features * actual_features
     if flat_values.size % out_features != 0:
         raise ValueError(
             f"linear weight count mismatch: file has {flat_values.size}, "
             f"not divisible by out_features={out_features}"
         )
     in_features = flat_values.size // out_features
-    if in_features > physical_logical_features:
+    if in_features > actual_features:
         raise ValueError(
             f"linear weight count mismatch: file has {flat_values.size}, max expected {expected_max} "
             f"for out_features={out_features}, input={input_channels}x{input_height}x{input_width}"
@@ -39,30 +37,25 @@ def convert_linear_weights(
         raise ValueError(
             f"aligned_input_channels={aligned_input_channels} must be >= input_channels={input_channels}"
         )
-    if input_storage_height < input_height or input_storage_width < input_width:
-        raise ValueError(
-            f"input storage HW {input_storage_height}x{input_storage_width} must contain "
-            f"logical HW {input_height}x{input_width}"
-        )
     if aligned_input_channels % 4 != 0:
         raise ValueError(f"FULL input channels must be padded to a multiple of 4, got {aligned_input_channels}")
 
     check_int8_range(flat_values)
     original = flat_values.reshape(out_features, in_features)
     padded = np.zeros(
-        (out_features, aligned_input_channels, input_storage_height, input_storage_width),
+        (out_features, aligned_input_channels, input_height, input_width),
         dtype=np.int64,
     )
     padded[:, :input_channels, :input_height, :input_width].reshape(
         out_features,
-        physical_logical_features,
+        actual_features,
     )[:, :in_features] = original
 
     emitted: List[int] = []
     for output_index in range(out_features):
         for channel_base in range(0, aligned_input_channels, 4):
-            for row in range(input_storage_height):
-                for col in range(input_storage_width):
+            for row in range(input_height):
+                for col in range(input_width):
                     for channel in range(channel_base, channel_base + 4):
                         emitted.append(
                             signed_to_unsigned_twos_complement(

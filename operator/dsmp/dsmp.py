@@ -17,12 +17,12 @@ def cfg_addr(reg: str, addr: int) -> List[str]:
     ]
 
 
-def encode_rdsmp(block_image: int, channels: int) -> int:
-    if not 1 <= block_image <= 64:
-        raise ValueError(f"dsmp block_image must be in [1, 64], got {block_image}")
-    if not 1 <= channels <= 256:
-        raise ValueError(f"dsmp input channels must be in [1, 256], got {channels}")
-    return ((block_image - 1) << 26) | ((channels - 1) << 18)
+def encode_rdsmp(feature_size: int, channels: int) -> int:
+    if not 1 <= feature_size <= 1024:
+        raise ValueError(f"dsmp feature size must be in [1, 1024], got {feature_size}")
+    if not 1 <= channels <= 1024:
+        raise ValueError(f"dsmp input channels must be in [1, 1024], got {channels}")
+    return ((feature_size - 1) << 22) | ((channels - 1) << 12)
 
 
 def compile_op(op_plan: Dict[str, Any], memory_plan: Dict[str, Any]) -> List[str]:
@@ -31,14 +31,9 @@ def compile_op(op_plan: Dict[str, Any], memory_plan: Dict[str, Any]) -> List[str
 
     input_addr = parse_addr(op_plan["input_addr"])
     output_addr = parse_addr(op_plan["output_addr"])
-    if "block_image" in op_plan:
-        block_image = int(op_plan["block_image"])
-    else:
-        image_size = int(op_plan["image_size"])
-        if image_size % 8 != 0:
-            raise ValueError(f"dsmp image_size must be divisible by 8, got {image_size}")
-        block_image = image_size // 8
-    rdsmp = encode_rdsmp(block_image=block_image, channels=int(op_plan["channels"]))
+    feature_size = int(op_plan.get("feature_size", op_plan.get("image_size")))
+    rdsmp = encode_rdsmp(feature_size=feature_size, channels=int(op_plan["channels"]))
+    dsmp_low16 = rdsmp & 0xFFFF
     dsmp_high16 = (rdsmp >> 16) & 0xFFFF
 
     asm: List[str] = [
@@ -48,8 +43,8 @@ def compile_op(op_plan: Dict[str, Any], memory_plan: Dict[str, Any]) -> List[str
     asm += cfg_addr("R1", input_addr)
     asm += cfg_addr("R2", output_addr)
     asm += [
+        f"CFG_REGISTER DSMP_P_1, 0x{dsmp_low16:04X}",
         f"CFG_REGISTER DSMP_P, 0x{dsmp_high16:04X}",
         "DSMP R1, R2",
     ]
     return asm
-

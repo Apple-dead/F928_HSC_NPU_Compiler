@@ -73,9 +73,14 @@ def generate_linear_params(layer_plan: dict, tensors: dict, model_params: Path, 
     weight_tensor = tensors[f"{layer_name}_weight"]
     out_features, in_features = [int(value) for value in weight_tensor["shape_oi"]]
     _, input_channels, input_height, input_width = [int(value) for value in weight_tensor["input_shape_nchw"]]
-    _, aligned_input_channels, input_storage_height, input_storage_width = [
-        int(value) for value in weight_tensor["input_storage_shape_nchw"]
+    _, aligned_input_channels, aligned_input_height, aligned_input_width = [
+        int(value) for value in weight_tensor["input_aligned_shape_nchw"]
     ]
+    if (aligned_input_height, aligned_input_width) != (input_height, input_width):
+        raise ValueError(
+            f"{layer_name}: input_aligned_shape_nchw must keep actual H/W, got "
+            f"{aligned_input_height}x{aligned_input_width}, expected {input_height}x{input_width}"
+        )
     weight_units = convert_linear_weights(
         read_linear_weight_txt(model_params / f"{layer_name}_weight.txt"),
         out_features=out_features,
@@ -83,10 +88,8 @@ def generate_linear_params(layer_plan: dict, tensors: dict, model_params: Path, 
         input_height=input_height,
         input_width=input_width,
         aligned_input_channels=aligned_input_channels,
-        input_storage_height=input_storage_height,
-        input_storage_width=input_storage_width,
     )
-    input_storage_bytes = aligned_input_channels * input_storage_height * input_storage_width
+    input_bytes = aligned_input_channels * input_height * input_width
     has_bias = bool(layer_plan.get("has_bias", False))
     raw_biases = parse_numbers(model_params / f"{layer_name}_bias.txt") if has_bias else []
     if has_bias and len(raw_biases) != out_features:
@@ -94,8 +97,8 @@ def generate_linear_params(layer_plan: dict, tensors: dict, model_params: Path, 
 
     result: list[int] = []
     for output_index in range(out_features):
-        weight_start = output_index * input_storage_bytes
-        weight_end = weight_start + input_storage_bytes
+        weight_start = output_index * input_bytes
+        weight_end = weight_start + input_bytes
         result.extend(weight_units[weight_start:weight_end])
         if has_bias:
             result.extend(int32_bias_word(raw_biases[output_index], output_index).to_bytes(4, "little"))

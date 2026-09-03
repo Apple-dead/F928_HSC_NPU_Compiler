@@ -35,7 +35,7 @@ pixel1: R, G, B, 0
 ...
 ```
 
-如果输入是单通道或其他通道数，内存占用仍按 4 通道对齐。输入 H/W 的物理存储尺寸按至少 8x8 且 8 的倍数预留；例如 28x28x1 的逻辑输入，对应 32x32x4 的存储 footprint。`generate_memory_plan.py` 会根据 `data/model_ir.json` 中的输入 shape 和存储对齐规则校验 `IMAGE_PATH` 指向的 COE word 数。
+如果输入是单通道或其他通道数，内存占用仍按 4 通道对齐。输入 H/W 按实际尺寸预留和校验，不会补零到 8 的倍数；例如 28x28x1 的输入，对应 28x28x4 的通道对齐 footprint。`generate_memory_plan.py` 会根据 `data/model_ir.json` 中的输入 shape 和通道对齐规则校验 `IMAGE_PATH` 指向的 COE word 数。
 
 ## 4. weight 布局
 
@@ -83,9 +83,9 @@ valid weights
 
 无 bias 时不生成 bias txt，不创建 `layerN_bias` tensor，不写 padded bias，后续 group 的 weight 偏移也不会跨过 bias 空间。
 
-## 6. RCONV condition_bias
+## 6. RCONV1 condition_bias
 
-`operator/conv/conv.py` 根据 op plan 中的 `has_bias` 写入 RCONV：
+`operator/conv/conv.py` 根据 op plan 中的 `has_bias` 写入 RCONV1：
 
 ```text
 condition_bias = 1  有 bias，NPU 从卷积核后读取 bias
@@ -108,7 +108,7 @@ group1 feature map
 ...
 ```
 
-每个 feature map 的通道数按 4 对齐。若单通道矩阵尺寸小于 8x8，运行时区域仍按 8x8 预留；若 H/W 不是 8 的倍数，物理存储尺寸也会向上对齐到 8 的倍数。后端按 NPU 物理执行语义传播 H/W：下一层使用上一层的 storage H/W 作为有效输入边长计算输出 H/W，本层输出再向上对齐到 8 的倍数作为下一层 storage H/W。有效输出尺寸保存在 `shape_nchw` / `logical_*_hw`，实际占用保存在 `storage_shape_nchw` / `*_hw`。
+每个 feature map 的通道数按 4 对齐。所有参与编译的 runtime feature map H/W 都按实际尺寸规划和配置：若输出为 `13x13`，后续 CONV/AVGPOOL/MAXPOOL/ReLU/DSMP 继续按 `13x13` 作为输入尺寸，不再补零到 8 的倍数。`shape_nchw` 保存实际通道和实际 H/W，`aligned_shape_nchw` 保存通道对齐后的形状，其中 H/W 与实际 H/W 相同。
 
 ## 8. 通道拆分
 
@@ -175,10 +175,10 @@ out1 bias (optional int32)
 单个输出的权重先扩展到：
 
 ```text
-[aligned_input_channels, input_storage_height, input_storage_width]
+[aligned_input_channels, input_height, input_width]
 ```
 
-其中逻辑通道不足 4 的倍数时补 0 通道；逻辑 H/W 小于 storage H/W 时，padded 行列也补 0。写入顺序为每 4 通道一组，组内按同一空间位置交织：
+其中输入通道不足 4 的倍数时补 0 通道；H/W 不做任何补零。写入顺序为每 4 通道一组，组内按同一空间位置交织：
 
 ```text
 group0 row0 col0 ch0, ch1, ch2, ch3

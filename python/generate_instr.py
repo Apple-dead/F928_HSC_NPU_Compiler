@@ -122,7 +122,9 @@ def build_conv_op_plan(
         split["conv"]
         | {
             "kernel_size": layer_plan["kernel_size"],
-            "feature_size": layer_plan["conv_output_hw"][1],
+            "padding": layer_plan["padding"],
+            "stride": layer_plan["stride"],
+            "feature_size": layer_plan["input_hw"][1],
             "input_channels": layer_plan["input_channels"],
             "output_channels": split["valid_channels"],
             "has_bias": bool(split["conv"].get("has_bias", False)),
@@ -289,4 +291,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
