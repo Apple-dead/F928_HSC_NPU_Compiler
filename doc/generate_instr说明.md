@@ -9,7 +9,7 @@ data/instr.asm
 data/instr.txt
 ```
 
-脚本不再读取旧的 `data/infer_ir/*.json`。层、group、地址、DSMP/ReLU/AVGPOOL/MAXPOOL 规划和通道拆分信息均来自 `memory_plan.json` 的 `execution_plan` 字段。
+脚本不再读取旧的 `data/infer_ir/*.json`。层、group、地址、DSMP/ReLU/AVGPOOL/MAXPOOL/USMP 规划和通道拆分信息均来自 `memory_plan.json` 的 `execution_plan` 字段。
 
 ## 2. 输入输出
 
@@ -116,6 +116,16 @@ CFG_REGISTER MAXPOOL_P,   ...
 MAXPOOL R1, R2
 ```
 
+USMP 作为独立 stage 写入 `execution_plan`，`op_type` 为 `usmp`。当前只对应 `upsample_nearest2d(scale_factor=[2,2], mode="nearest")`，每个 stage 由单个 split 覆盖完整输入通道，生成：
+
+```asm
+CFG_REGISTER RUSMP_LOW,  ...
+CFG_REGISTER RUSMP_HIGH, ...
+USMP R1, R2
+```
+
+`pad -> maxpool2d` 融合后只生成 MAXPOOL 指令；`cat` 通过 memory plan 预布局表示，不生成独立指令。
+
 ## 5. operator 调用
 
 `generate_instr.py` 不直接拼具体寄存器配置，而是调用：
@@ -126,6 +136,7 @@ operator/dsmp/dsmp.py
 operator/relu/relu.py
 operator/avgpool/avgpool.py
 operator/maxpool/maxpool.py
+operator/usmp/usmp.py
 operator/full/full.py
 ```
 

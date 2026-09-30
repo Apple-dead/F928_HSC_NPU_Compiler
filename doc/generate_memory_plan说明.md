@@ -22,7 +22,7 @@ IMAGE_PATH 指向的输入 COE
 python ./python/generate_memory_plan.py --model-ir ./data/model_ir.json --out ./data/memory_plan.json
 ```
 
-该脚本负责把 IR 中后端可支持的 `conv2d/relu/avgpool2d/maxpool2d/linear` 路径转换为 NPU 地址规划、参数区规划和分组执行计划。
+该脚本负责把 IR 中后端可支持的 `conv2d/relu/avgpool2d/maxpool2d/linear/upsample_nearest2d/pad/cat` 路径转换为 NPU 地址规划、参数区规划和分组执行计划。
 
 ## 2. 后端支持范围
 
@@ -33,10 +33,13 @@ conv2d
 relu
 avgpool2d
 maxpool2d
+upsample_nearest2d
+pad
+cat
 linear
 ```
 
-如果 IR 中出现暂不支持的 op，会直接报错，不会静默跳过。`flatten` 不属于后端 op，已在前端透传忽略。
+如果 IR 中出现暂不支持的 op，会直接报错，不会静默跳过。`flatten` 不属于后端 op，已在前端透传忽略。`pad` 和 `cat` 当前只支持能被规划为零拷贝/融合语义的模式，不能独立生成通用搬移指令。
 
 ```text
 Unsupported op xxx at op id N.
@@ -67,9 +70,9 @@ INFER_PARSE_OP_LIMIT
 CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD
 ```
 
-`ENABLE_OUTPUT_ADDR = False` 时，最终输出仍按原逻辑从 runtime 区分配，`RUNTIME_LIMIT_ADDR` 是 runtime feature/output 区的半开上限，memory plan 会检查 `runtime_end_addr_exclusive <= RUNTIME_LIMIT_ADDR`。
+`ENABLE_OUTPUT_ADDR = False` 时，模型输出从 runtime 区分配。memory plan 会先排除 graph outputs 原本占用的普通 runtime 区，再按 graph output 顺序把输出连续放到非输出 runtime 数据之后；如果某个输出本来已经位于尾部，则会复用原地址，不额外后移。`RUNTIME_LIMIT_ADDR` 是 runtime feature/output 区的半开上限，memory plan 会检查 `runtime_end_addr_exclusive <= RUNTIME_LIMIT_ADDR`。
 
-`ENABLE_OUTPUT_ADDR = True` 时，最后一次计算的模型输出强制放到 `OUTPUT_BASE_ADDR`，并检查 `output_end_addr_exclusive <= OUTPUT_LIMIT_ADDR`；此时 `RUNTIME_LIMIT_ADDR` 只约束最后一次计算之前的中间 runtime 数据。
+`ENABLE_OUTPUT_ADDR = True` 时，graph outputs 按顺序从 `OUTPUT_BASE_ADDR` 开始连续放置，并检查 `output_end_addr_exclusive <= OUTPUT_LIMIT_ADDR`；此时 `RUNTIME_LIMIT_ADDR` 只约束模型输出之外的中间 runtime 数据。
 
 `INPUT_HEIGHT` / `INPUT_WIDTH` 只作为 PT2 输入 shape metadata 缺失时的 fallback。正常情况下，输入尺寸和通道数来自 `data/model_ir.json`，而 `data/model_ir.json` 的 input 字段来自 PT2 graph metadata；只要 PT2 中存在该 metadata，memory plan 就不会使用 `INPUT_HEIGHT` / `INPUT_WIDTH`。
 
@@ -98,6 +101,10 @@ file
 ### model_ops
 
 保存从 IR 读取的完整 op 列表，便于排查 unsupported op。
+
+### model_output_values / model_outputs / output_regions
+
+`model_output_values` 保存前端从 PT2 graph output 解析出的 IR value 顺序。规划完成后，`model_outputs` 和 `output_regions` 记录每个模型输出的 tensor、起始地址、大小和 shape。
 
 ### model_layers
 
@@ -208,6 +215,8 @@ generate_instr.py 只生成 CONV 和 END
 
 当 IR 包含 `conv2d -> relu`，memory plan 才会规划 ReLU 阶段。
 
+`upsample_nearest2d` 会规划为 `op_type = "usmp"` 的 execution stage。`cat` 在满足通道维拼接和 4 通道对齐条件时不生成 execution stage，而是在生产者输出时预先把各输入放到同一个连续 `cat_out` tensor 的不同 offset。`pad -> maxpool2d` 在满足 `[0,1,0,1]` 常量 0 padding、`kernel_size=[2,2]`、`stride=[1,1]` 时融合为一条 MAXPOOL stage，依赖 NPU 的右/下边界隐式 0 语义，不单独分配 pad 输出。
+
 ## 8. 通道和尺寸规划
 
 - 数据按 4 通道对齐。
@@ -221,9 +230,17 @@ generate_instr.py 只生成 CONV 和 END
 - DSMP 的输入和输出按实际矩阵边长处理；例如输入为 `13x13` 时，DSMP 输出 H/W 为 `6x6`，下一层按实际 `6x6` 配置。DSMP 的通道数按实际输入通道数配置，范围为 1 到 1024，不再按 conv group 拆分。
 - `stride>2` 或 `stride=2,padding!=0` 会报错。
 - AVGPOOL/MAXPOOL 仅支持 `stride=[1,1]` 或 `stride=[2,2]`，并分别写入 RAVGPOOL/RMAXPOOL 的 step 字段：`stride=[1,1] -> step=0`，`stride=[2,2] -> step=1`。
-- AVGPOOL/MAXPOOL 不做任何 H/W 补零，输出 H/W 按普通 2x2、padding=0 池化公式规划：`out = floor((in - 2) / stride) + 1`。因此 `stride=[1,1]` 时输出为输入 H/W 各减 1，`stride=[2,2]` 时输出为普通 2 倍下采样结果。
+- AVGPOOL/MAXPOOL 默认不做任何 H/W 补零，输出 H/W 按普通 2x2、padding=0 池化公式规划：`out = floor((in - 2) / stride) + 1`。因此 `stride=[1,1]` 时输出为输入 H/W 各减 1，`stride=[2,2]` 时输出为普通 2 倍下采样结果。唯一例外是已融合的 `pad -> maxpool2d`，该模式按 NPU 边界语义使输出 H/W 与 pad 前输入一致。
 
-## 9. Linear / FULL 规划规则
+## 9. Pad / Cat / USMP 规划规则
+
+`upsample_nearest2d` 当前只支持 `mode="nearest"` 且 `scale_factor=[2,2]`，输入 H/W 必须为正方形，通道数范围为 1 到 1024。规划后生成 USMP 指令，输出 H/W 为输入的 2 倍。
+
+`pad` 当前不作为独立算子执行，只支持紧跟 `maxpool2d` 的右/下各补 1、常量 0 场景；该模式会融合进后续 MAXPOOL，并将 MAXPOOL 的输入尺寸配置为 pad 前尺寸。
+
+`cat` 当前只支持 `dim=1` 的通道维拼接。memory plan 会提前创建完整 `cat_out` 区域，并要求各输入生产者按通道顺序直接输出到对应 offset，后续消费者读取 `cat_out`，因此不会生成 MOVE 指令。
+
+## 10. Linear / FULL 规划规则
 
 当前 memory plan 支持 `linear`，并将其规划为 `op_type = "linear"` 的 execution stage。`flatten` 已在前端透传，不会进入 `model_ir.json` 和 `memory_plan.json`。
 

@@ -6,6 +6,9 @@ SUPPORTED_IR_OPS = {
     "relu",
     "avgpool2d",
     "maxpool2d",
+    "upsample_nearest2d",
+    "pad",
+    "cat",
     "linear",
 }
 
@@ -14,5 +17,8 @@ BACKEND_SUPPORTED_OPS = {
     "relu",
     "avgpool2d",
     "maxpool2d",
+    "upsample_nearest2d",
+    "pad",
+    "cat",
     "linear",
 }

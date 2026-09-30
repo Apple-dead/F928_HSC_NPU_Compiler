@@ -33,6 +33,10 @@ aten.conv2d.default        -> conv2d
 aten.relu.default          -> relu
 aten.leaky_relu.default    -> relu
 aten.avg_pool2d.default    -> avgpool2d
+aten.max_pool2d.default    -> maxpool2d
+aten.upsample_nearest2d.vec -> upsample_nearest2d
+aten.pad.default           -> pad
+aten.cat.default           -> cat
 aten.linear.default        -> linear
 ```
 
@@ -46,6 +50,10 @@ aten.flatten.using_ints
 ```
 
 `aten.leaky_relu.default` 会写成 IR 的 `relu`，并记录 `negative_slope` 和 `tan`。
+
+`aten.upsample_nearest2d.vec` 当前只接受 `nn.Upsample(scale_factor=2, mode="nearest")` 语义，即 H/W 同时按最近邻复制放大 2 倍。如果 PT2 图中使用 output_size 形式、非 2 倍 scale 或非 nearest 模式，前端会直接报错。
+
+前端会记录 graph output 顺序到顶层 `outputs` 列表；兼容旧流程的 `output` 字段仍保留，并指向最后一个 graph output。
 
 当前根目录 `model.pt2` 会导出为：
 

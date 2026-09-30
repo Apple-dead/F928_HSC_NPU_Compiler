@@ -108,7 +108,9 @@ group1 feature map
 ...
 ```
 
-每个 feature map 的通道数按 4 对齐。所有参与编译的 runtime feature map H/W 都按实际尺寸规划和配置：若输出为 `13x13`，后续 CONV/AVGPOOL/MAXPOOL/ReLU/DSMP 继续按 `13x13` 作为输入尺寸，不再补零到 8 的倍数。`shape_nchw` 保存实际通道和实际 H/W，`aligned_shape_nchw` 保存通道对齐后的形状，其中 H/W 与实际 H/W 相同。
+每个 feature map 的通道数按 4 对齐。所有参与编译的 runtime feature map H/W 都按实际尺寸规划和配置：若输出为 `13x13`，后续 CONV/AVGPOOL/MAXPOOL/ReLU/DSMP/USMP 继续按 `13x13` 作为输入尺寸，不再补零到 8 的倍数。`shape_nchw` 保存实际通道和实际 H/W，`aligned_shape_nchw` 保存通道对齐后的形状，其中 H/W 与实际 H/W 相同。
+
+通道维 `cat` 不通过 MOVE 重排数据；memory plan 会提前创建完整 `cat_out` 区域，并让各输入生产者按通道顺序直接写入对应 offset。后续消费者读取 `cat_out` 基址，因此 `cat` 本身不新增运行时数据拷贝。
 
 ## 8. 通道拆分
 
@@ -152,6 +154,8 @@ instr
 target/all.coe
 target/all.coe.map.txt
 ```
+
+`target/all.coe.map.txt` 会额外列出 `Model outputs`，包括每个 graph output 的序号、IR value 名称、tensor 名称、起始地址、大小、结束地址和 shape，便于 NPU 侧按输出顺序取数。
 
 ## 10. Linear / FULL 参数与输出布局
 

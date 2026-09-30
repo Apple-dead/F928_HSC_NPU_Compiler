@@ -68,25 +68,10 @@ def add_runtime_region(plan: Dict[str, Any], name: str, size: int, **extra: Any)
     return item
 
 
-def add_output_region(plan: Dict[str, Any], name: str, size: int, **extra: Any) -> Dict[str, Any]:
-    if plan["output_regions"]:
-        raise ValueError("only one fixed model output region is supported")
-    item = region(name, cfg.OUTPUT_BASE_ADDR, size, **extra)
+def add_output_region_at(plan: Dict[str, Any], name: str, addr: int, size: int, **extra: Any) -> Dict[str, Any]:
+    item = region(name, addr, size, **extra)
     plan["output_regions"].append(item)
     return item
-
-
-def add_model_output_or_runtime_region(
-    plan: Dict[str, Any],
-    name: str,
-    size: int,
-    *,
-    is_model_output: bool,
-    **extra: Any,
-) -> Dict[str, Any]:
-    if is_model_output and bool(getattr(cfg, "ENABLE_OUTPUT_ADDR", False)):
-        return add_output_region(plan, name, size, is_model_output=True, **extra)
-    return add_runtime_region(plan, name, size, **extra)
 
 
 def validate_no_overlap(a_start: int, a_size: int, b_start: int, b_size: int, a_name: str, b_name: str) -> None:
@@ -142,6 +127,9 @@ def channel_group_max_channels(
 def instr_count_for_execution_plan(execution_plan: List[Dict[str, Any]]) -> int:
     total = 1
     for stage in execution_plan:
+        if stage.get("op_type") == "usmp":
+            total += 7 * len(stage.get("splits", []))
+            continue
         if stage.get("op_type") == "linear":
             total += 9 * int(stage.get("output_features", 0))
             continue
@@ -475,6 +463,377 @@ def build_pool_execution_plan(
         "splits": splits,
     }
 
+
+def build_usmp_execution_plan(
+    *,
+    layer_name: str,
+    input_channels: int,
+    aligned_input_channels: int,
+    input_h: int,
+    input_w: int,
+    output_h: int,
+    output_w: int,
+    input_tensor: Dict[str, Any],
+    output_tensor: Dict[str, Any],
+    usmp: Dict[str, Any],
+) -> Dict[str, Any]:
+    if input_channels > 1024:
+        raise NotImplementedError(
+            f"{layer_name}: usmp input channels > 1024 are not supported by current RUSMP."
+        )
+    if input_h != input_w:
+        raise ValueError(f"{layer_name}: usmp input HW must be square, got {input_h}x{input_w}")
+    if output_h != input_h * 2 or output_w != input_w * 2:
+        raise ValueError(
+            f"{layer_name}: current USMP backend only supports nearest x2, got "
+            f"input={input_h}x{input_w}, output={output_h}x{output_w}"
+        )
+
+    input_size = aligned_input_channels * input_h * input_w
+    output_size = aligned_input_channels * output_h * output_w
+    splits: List[Dict[str, Any]] = [
+        {
+            "group_index": 0,
+            "start_channel": 0,
+            "channels": input_channels,
+            "valid_channels": input_channels,
+            "aligned_channels": aligned_input_channels,
+            "has_padding": aligned_input_channels != input_channels,
+            "offsets_bytes": {
+                "input": 0,
+                "output": 0,
+            },
+            "size_bytes": {
+                "input": input_size,
+                "output": output_size,
+            },
+            "usmp": {
+                "input_addr": input_tensor["addr"],
+                "output_addr": output_tensor["addr"],
+                "feature_size": input_w,
+                "channels": input_channels,
+                "scale_factor": usmp["scale_factor"],
+                "mode": usmp["mode"],
+            },
+        }
+    ]
+
+    return {
+        "op_type": "usmp",
+        "layer": layer_name,
+        "channel_alignment": 4,
+        "usmp_channel_unit": "all_input_channels",
+        "input_channels": input_channels,
+        "output_channels": input_channels,
+        "aligned_input_channels": aligned_input_channels,
+        "aligned_output_channels": aligned_input_channels,
+        "scale_factor": usmp["scale_factor"],
+        "mode": usmp["mode"],
+        "input_hw": [input_h, input_w],
+        "logical_output_hw": [output_h, output_w],
+        "output_hw": [output_h, output_w],
+        "reserved_regions": {
+            "usmp_out": {
+                "addr": output_tensor["addr"],
+                "size_bytes": output_tensor["size_bytes"],
+                "layout": "channel_groups_are_tightly_packed",
+            },
+        },
+        "splits": splits,
+    }
+
+
+def shape_from_nchw(shape: List[int]) -> Dict[str, int]:
+    if len(shape) != 4:
+        raise ValueError(f"expected NCHW shape, got {shape}")
+    return make_value_shape(
+        height=int(shape[2]),
+        width=int(shape[3]),
+        channels=int(shape[1]),
+        aligned_channels=aligned_channels(int(shape[1])),
+    )
+
+
+def output_shape_by_value(ir: Dict[str, Any]) -> Dict[str, Dict[str, int]]:
+    result: Dict[str, Dict[str, int]] = {}
+    input_info = ir.get("input", {})
+    input_name = input_info.get("name")
+    if input_name:
+        result[str(input_name)] = make_value_shape(
+            height=int(input_info["height"]),
+            width=int(input_info["width"]),
+            channels=int(input_info["channels"]),
+            aligned_channels=aligned_channels(int(input_info["channels"])),
+        )
+    for op in ir.get("ops", []):
+        output = op.get("output")
+        shape = op.get("output_shape")
+        if output is not None and shape is not None and len(shape) == 4:
+            result[str(output)] = shape_from_nchw([int(value) for value in shape])
+    return result
+
+
+def model_output_items(ir: Dict[str, Any]) -> List[Dict[str, Any]]:
+    outputs = ir.get("outputs")
+    if isinstance(outputs, list) and outputs:
+        return outputs
+    output = ir.get("output", {})
+    if output.get("name") is None:
+        return []
+    return [
+        {
+            "index": 0,
+            "name": output["name"],
+            "source": output.get("source"),
+            "producer_op_id": output.get("producer_op_id"),
+            "producer_op": output.get("producer_op"),
+        }
+    ]
+
+
+def build_cat_aliases(ir: Dict[str, Any]) -> Dict[str, Any]:
+    shapes = output_shape_by_value(ir)
+    input_aliases: Dict[str, Dict[str, Any]] = {}
+    output_tensors: Dict[str, Dict[str, Any]] = {}
+    for op in ir.get("ops", []):
+        if op.get("op") != "cat":
+            continue
+        if int(op.get("dim", 0)) != 1:
+            continue
+        cat_output = str(op["output"])
+        inputs = [str(value) for value in op.get("input", [])]
+        if len(inputs) < 2:
+            continue
+        cat_shape = shapes.get(cat_output)
+        if cat_shape is None:
+            continue
+        height = int(cat_shape["height"])
+        width = int(cat_shape["width"])
+        output_channels = int(cat_shape["channels"])
+        aligned_output_ch = int(cat_shape["aligned_channels"])
+        if output_channels != aligned_output_ch:
+            continue
+
+        offset = 0
+        input_infos: List[Dict[str, Any]] = []
+        can_alias = True
+        for input_value in inputs:
+            input_shape = shapes.get(input_value)
+            if input_shape is None:
+                can_alias = False
+                break
+            channels = int(input_shape["channels"])
+            aligned_ch = int(input_shape["aligned_channels"])
+            if int(input_shape["height"]) != height or int(input_shape["width"]) != width or channels != aligned_ch:
+                can_alias = False
+                break
+            size = height * width * aligned_ch
+            input_infos.append(
+                {
+                    "value": input_value,
+                    "offset_bytes": offset,
+                    "size_bytes": size,
+                    "segment_height": height,
+                    "segment_width": width,
+                    "segment_channels": channels,
+                    "segment_aligned_channels": aligned_ch,
+                }
+            )
+            offset += size
+        if not can_alias or offset != height * width * aligned_output_ch:
+            continue
+
+        tensor_name = f"{op.get('name', 'cat')}_out"
+        output_info = {
+            "cat_output": cat_output,
+            "tensor_name": tensor_name,
+            "layer": op.get("name", tensor_name),
+            "inputs": inputs,
+            "input_infos": input_infos,
+            "height": height,
+            "width": width,
+            "channels": output_channels,
+            "aligned_channels": aligned_output_ch,
+            "size_bytes": offset,
+        }
+        output_tensors[cat_output] = output_info
+        for input_info in input_infos:
+            input_aliases[input_info["value"]] = {**output_info, "segment": input_info}
+    return {
+        "input_aliases": input_aliases,
+        "output_tensors": output_tensors,
+    }
+
+
+def ensure_cat_output_tensor(plan: Dict[str, Any], alias: Dict[str, Any]) -> Dict[str, Any]:
+    tensor_name = alias["tensor_name"]
+    tensor = plan["tensors"].get(tensor_name)
+    if tensor is not None:
+        return tensor
+    runtime = add_runtime_region(
+        plan,
+        tensor_name,
+        int(alias["size_bytes"]),
+        channels=int(alias["channels"]),
+        aligned_channels=int(alias["aligned_channels"]),
+        shape_nchw=[1, int(alias["channels"]), int(alias["height"]), int(alias["width"])],
+        aligned_shape_nchw=[1, int(alias["aligned_channels"]), int(alias["height"]), int(alias["width"])],
+        layout="channel_concat_alias_4channel_pixel_interleaved",
+    )
+    plan["tensors"][tensor_name] = runtime
+    plan.setdefault("aliases", []).append(
+        {
+            "type": "cat",
+            "output": alias["cat_output"],
+            "tensor": tensor_name,
+            "inputs": alias["inputs"],
+            "layout": "producer_outputs_preplaced_in_channel_order",
+        }
+    )
+    return runtime
+
+
+def add_feature_region_for_value(
+    plan: Dict[str, Any],
+    value_name: Any,
+    tensor_name: str,
+    size: int,
+    **extra: Any,
+) -> Dict[str, Any]:
+    alias = plan.get("_cat_input_aliases", {}).get(str(value_name)) if value_name is not None else None
+    if alias is None:
+        return add_runtime_region(plan, tensor_name, size, **extra)
+    segment = alias["segment"]
+    if int(segment["size_bytes"]) != size:
+        raise ValueError(
+            f"{tensor_name}: cat alias size mismatch for {value_name!r}: "
+            f"producer={size}, alias={segment['size_bytes']}"
+        )
+    cat_tensor = ensure_cat_output_tensor(plan, alias)
+    item = region(
+        tensor_name,
+        addr_to_int(cat_tensor["addr"]) + int(segment["offset_bytes"]),
+        size,
+        **extra,
+        alias_of=alias["tensor_name"],
+        alias_offset_bytes=int(segment["offset_bytes"]),
+    )
+    return item
+
+
+def replace_execution_plan_addresses(value: Any, replacements: List[tuple[int, int, int]]) -> Any:
+    if isinstance(value, dict):
+        return {key: replace_execution_plan_addresses(item, replacements) for key, item in value.items()}
+    if isinstance(value, list):
+        return [replace_execution_plan_addresses(item, replacements) for item in value]
+    if isinstance(value, str) and value.startswith("0x"):
+        try:
+            addr = int(value, 16)
+        except ValueError:
+            return value
+        for old_base, new_base, size in replacements:
+            if old_base <= addr < old_base + size:
+                return hex_addr(new_base + (addr - old_base))
+    return value
+
+
+def relocate_model_outputs(
+    plan: Dict[str, Any],
+    outputs: List[Dict[str, Any]],
+    value_tensors: Dict[str, str],
+    value_shapes: Dict[str, Dict[str, int]],
+) -> None:
+    if not outputs:
+        return
+
+    enable_output_addr = bool(getattr(cfg, "ENABLE_OUTPUT_ADDR", False))
+    output_infos: List[Dict[str, Any]] = []
+    output_tensor_names: set[str] = set()
+
+    for index, output in enumerate(outputs):
+        value_name = str(output["name"])
+        tensor_name = value_tensors.get(value_name)
+        if tensor_name is None:
+            raise ValueError(f"model output {index} references unknown IR value {value_name!r}")
+        tensor = plan["tensors"][tensor_name]
+        output_infos.append(
+            {
+                "index": index,
+                "value_name": value_name,
+                "tensor_name": tensor_name,
+                "tensor": tensor,
+                "output": output,
+            }
+        )
+        output_tensor_names.add(tensor_name)
+
+    plan["runtime_regions"] = [
+        item for item in plan["runtime_regions"] if item.get("name") not in output_tensor_names
+    ]
+    runtime_tail = cfg.RUNTIME_BASE_ADDR
+    if plan["runtime_regions"]:
+        runtime_tail = max(addr_to_int(item["end_addr_exclusive"]) for item in plan["runtime_regions"])
+
+    cursor = cfg.OUTPUT_BASE_ADDR if enable_output_addr else align_up(runtime_tail, 4)
+    output_regions: List[Dict[str, Any]] = []
+    replacements: List[tuple[int, int, int]] = []
+    model_outputs: List[Dict[str, Any]] = []
+
+    for info in output_infos:
+        index = int(info["index"])
+        value_name = str(info["value_name"])
+        tensor_name = str(info["tensor_name"])
+        tensor = info["tensor"]
+        output = info["output"]
+        old_base = addr_to_int(tensor["addr"])
+        size = int(tensor["size_bytes"])
+        cursor = align_up(cursor, 4)
+        new_region = add_output_region_at(
+            plan,
+            f"output{index}_{tensor_name}",
+            cursor,
+            size,
+            is_model_output=True,
+            output_index=index,
+            output_value=value_name,
+            output_tensor=tensor_name,
+            source=output.get("source"),
+            channels=tensor.get("channels", value_shapes[value_name].get("channels")),
+            aligned_channels=tensor.get("aligned_channels", value_shapes[value_name].get("aligned_channels")),
+            shape_nchw=tensor.get("shape_nchw"),
+            aligned_shape_nchw=tensor.get("aligned_shape_nchw"),
+            shape=tensor.get("shape"),
+            layout=tensor.get("layout", "channel_groups_are_tightly_packed"),
+        )
+        replacements.append((old_base, cursor, size))
+        tensor.update(
+            {
+                "addr": new_region["addr"],
+                "end_addr_exclusive": new_region["end_addr_exclusive"],
+                "is_model_output": True,
+                "output_index": index,
+                "output_value": value_name,
+            }
+        )
+        output_regions.append(new_region)
+        model_outputs.append(
+            {
+                "index": index,
+                "name": value_name,
+                "tensor": tensor_name,
+                "addr": new_region["addr"],
+                "size_bytes": size,
+                "end_addr_exclusive": new_region["end_addr_exclusive"],
+                "shape": tensor.get("shape_nchw", tensor.get("shape")),
+            }
+        )
+        cursor += size
+
+    plan["execution_plan"] = replace_execution_plan_addresses(plan["execution_plan"], replacements)
+    plan["model_outputs"] = model_outputs
+    plan["_next_runtime_addr"] = runtime_tail if enable_output_addr else cursor
+
+
 def validate_input_coe_size(file_text: str, expected_size: int, expected_shape: List[int]) -> None:
     path = resolve_project_path(file_text)
     if not path.is_file():
@@ -553,6 +912,84 @@ def parse_pool_unit(ops: List[Dict[str, Any]], index: int, units: List[Dict[str,
     )
 
 
+def parse_fused_pad_maxpool_unit(
+    ops: List[Dict[str, Any]],
+    index: int,
+    units: List[Dict[str, Any]],
+) -> tuple[Dict[str, Any], int]:
+    pad_op = ops[index]
+    pool_op = ops[index + 1]
+    if pad_op.get("pad") != [0, 1, 0, 1]:
+        raise ValueError(f"{pad_op.get('name')}: only pad [0, 1, 0, 1] can be fused into maxpool")
+    if pad_op.get("mode") != "constant" or float(pad_op.get("value", 0.0)) != 0.0:
+        raise ValueError(
+            f"{pad_op.get('name')}: only constant zero pad can be fused into maxpool, "
+            f"got mode={pad_op.get('mode')!r}, value={pad_op.get('value')!r}"
+        )
+    unit, _ = parse_pool_unit(ops, index + 1, units)
+    pool = unit["pool"]
+    if unit["op_type"] != "maxpool" or pool["kernel_size"] != [2, 2] or pool["stride"] != [1, 1]:
+        raise ValueError(
+            f"{pad_op.get('name')}: only pad [0, 1, 0, 1] followed by maxpool kernel=2 stride=1 can be fused"
+        )
+    unit["input"] = pad_op.get("input")
+    unit["fused_pad"] = {
+        "op": pad_op.get("name"),
+        "pad": pad_op.get("pad"),
+        "mode": pad_op.get("mode"),
+        "value": pad_op.get("value", 0.0),
+        "npu_semantics": "maxpool_implicit_right_bottom_zero_boundary",
+    }
+    return unit, index + 2
+
+
+def parse_usmp_unit(ops: List[Dict[str, Any]], index: int, units: List[Dict[str, Any]]) -> tuple[Dict[str, Any], int]:
+    op = ops[index]
+    return (
+        {
+            "op_type": "usmp",
+            "layer": op.get("name", f"usmp_{len(units)}"),
+            "input": op.get("input"),
+            "output": op.get("output"),
+            "usmp": {
+                "scale_factor": [int(op["scale_factor"][0]), int(op["scale_factor"][1])],
+                "mode": op.get("mode", "nearest"),
+            },
+        },
+        index + 1,
+    )
+
+
+def parse_pad_unit(ops: List[Dict[str, Any]], index: int, units: List[Dict[str, Any]]) -> tuple[Dict[str, Any], int]:
+    op = ops[index]
+    return (
+        {
+            "op_type": "pad",
+            "layer": op.get("name", f"pad_{len(units)}"),
+            "input": op.get("input"),
+            "output": op.get("output"),
+            "pad": [int(value) for value in op["pad"]],
+            "mode": op.get("mode", "constant"),
+            "value": float(op.get("value", 0.0)),
+        },
+        index + 1,
+    )
+
+
+def parse_cat_unit(ops: List[Dict[str, Any]], index: int, units: List[Dict[str, Any]]) -> tuple[Dict[str, Any], int]:
+    op = ops[index]
+    return (
+        {
+            "op_type": "cat",
+            "layer": op.get("name", f"cat_{len(units)}"),
+            "inputs": [str(value) for value in op["input"]],
+            "output": op.get("output"),
+            "dim": int(op.get("dim", 0)),
+        },
+        index + 1,
+    )
+
+
 def parse_linear_unit(ops: List[Dict[str, Any]], index: int, units: List[Dict[str, Any]]) -> tuple[Dict[str, Any], int]:
     op = ops[index]
     linear_index = len([unit for unit in units if unit["op_type"] == "linear"]) + 1
@@ -577,6 +1014,9 @@ UNIT_PARSERS = {
     "conv2d": parse_conv_unit,
     "avgpool2d": parse_pool_unit,
     "maxpool2d": parse_pool_unit,
+    "upsample_nearest2d": parse_usmp_unit,
+    "pad": parse_pad_unit,
+    "cat": parse_cat_unit,
     "linear": parse_linear_unit,
 }
 
@@ -588,6 +1028,15 @@ def execution_units_from_ir(ir: Dict[str, Any]) -> List[Dict[str, Any]]:
     while index < len(ops):
         op = ops[index]
         op_name = op.get("op")
+        if (
+            op_name == "pad"
+            and index + 1 < len(ops)
+            and ops[index + 1].get("op") == "maxpool2d"
+            and ops[index + 1].get("input") == op.get("output")
+        ):
+            unit, index = parse_fused_pad_maxpool_unit(ops, index, units)
+            units.append(unit)
+            continue
         if op_name not in BACKEND_SUPPORTED_OPS:
             raise NotImplementedError(
                 f"Unsupported op {op_name} at op id {op.get('id')}. "
@@ -709,8 +1158,6 @@ def plan_pool_unit(
     unit: Dict[str, Any],
     value_tensors: Dict[str, str],
     value_shapes: Dict[str, Dict[str, int]],
-    *,
-    is_model_output: bool,
 ) -> None:
     layer_name = unit["layer"]
     _, input_tensor_name, input_shape = require_input_value(unit, value_tensors, value_shapes)
@@ -720,35 +1167,42 @@ def plan_pool_unit(
     input_channels = int(input_shape["channels"])
     aligned_input_ch = int(input_shape["aligned_channels"])
     validate_feature_hw(input_h, input_w)
-    pool_out_h, pool_out_w = pool_output_hw(input_h, input_w, unit["pool"], op_type=unit["op_type"])
+    if unit.get("fused_pad") is not None:
+        if unit["op_type"] != "maxpool":
+            raise ValueError(f"{layer_name}: only maxpool supports fused pad semantics")
+        pool_out_h, pool_out_w = input_h, input_w
+    else:
+        pool_out_h, pool_out_w = pool_output_hw(input_h, input_w, unit["pool"], op_type=unit["op_type"])
     pool_output_size = pool_out_h * pool_out_w * aligned_input_ch
     tensor_name = f"{layer_name}_out"
-    runtime = add_model_output_or_runtime_region(
+    runtime = add_feature_region_for_value(
         plan,
+        unit.get("output"),
         tensor_name,
         pool_output_size,
-        is_model_output=is_model_output,
         channels=input_channels,
         aligned_channels=aligned_input_ch,
         shape_nchw=[1, input_channels, pool_out_h, pool_out_w],
         aligned_shape_nchw=[1, aligned_input_ch, pool_out_h, pool_out_w],
     )
     plan["tensors"][tensor_name] = runtime
-    plan["execution_plan"].append(
-        build_pool_execution_plan(
-            op_name=unit["op_type"],
-            layer_name=layer_name,
-            input_channels=input_channels,
-            aligned_input_channels=aligned_input_ch,
-            input_h=input_h,
-            input_w=input_w,
-            output_h=pool_out_h,
-            output_w=pool_out_w,
-            input_tensor=input_tensor_info,
-            output_tensor=runtime,
-            pool=unit["pool"],
-        )
+    stage = build_pool_execution_plan(
+        op_name=unit["op_type"],
+        layer_name=layer_name,
+        input_channels=input_channels,
+        aligned_input_channels=aligned_input_ch,
+        input_h=input_h,
+        input_w=input_w,
+        output_h=pool_out_h,
+        output_w=pool_out_w,
+        input_tensor=input_tensor_info,
+        output_tensor=runtime,
+        pool=unit["pool"],
     )
+    if unit.get("fused_pad") is not None:
+        stage["fused_pad"] = unit["fused_pad"]
+        stage["output_hw_semantics"] = "npu_implicit_right_bottom_zero_boundary"
+    plan["execution_plan"].append(stage)
     register_value(
         value_tensors,
         value_shapes,
@@ -761,13 +1215,125 @@ def plan_pool_unit(
     )
 
 
+def plan_usmp_unit(
+    plan: Dict[str, Any],
+    unit: Dict[str, Any],
+    value_tensors: Dict[str, str],
+    value_shapes: Dict[str, Dict[str, int]],
+) -> None:
+    layer_name = unit["layer"]
+    _, input_tensor_name, input_shape = require_input_value(unit, value_tensors, value_shapes)
+    input_tensor_info = plan["tensors"][input_tensor_name]
+    input_h = int(input_shape["height"])
+    input_w = int(input_shape["width"])
+    input_channels = int(input_shape["channels"])
+    aligned_input_ch = int(input_shape["aligned_channels"])
+    validate_feature_hw(input_h, input_w)
+
+    usmp = unit["usmp"]
+    scale = [int(usmp["scale_factor"][0]), int(usmp["scale_factor"][1])]
+    if usmp.get("mode") != "nearest":
+        raise ValueError(f"{layer_name}: only nearest USMP is supported, got mode={usmp.get('mode')!r}")
+    if scale != [2, 2]:
+        raise ValueError(f"{layer_name}: only scale_factor=[2, 2] is supported, got {scale}")
+    output_h = input_h * 2
+    output_w = input_w * 2
+    output_size = output_h * output_w * aligned_input_ch
+    tensor_name = f"{layer_name}_out"
+    runtime = add_feature_region_for_value(
+        plan,
+        unit.get("output"),
+        tensor_name,
+        output_size,
+        channels=input_channels,
+        aligned_channels=aligned_input_ch,
+        shape_nchw=[1, input_channels, output_h, output_w],
+        aligned_shape_nchw=[1, aligned_input_ch, output_h, output_w],
+    )
+    plan["tensors"][tensor_name] = runtime
+    plan["execution_plan"].append(
+        build_usmp_execution_plan(
+            layer_name=layer_name,
+            input_channels=input_channels,
+            aligned_input_channels=aligned_input_ch,
+            input_h=input_h,
+            input_w=input_w,
+            output_h=output_h,
+            output_w=output_w,
+            input_tensor=input_tensor_info,
+            output_tensor=runtime,
+            usmp=unit["usmp"],
+        )
+    )
+    register_value(
+        value_tensors,
+        value_shapes,
+        unit.get("output"),
+        tensor_name,
+        height=output_h,
+        width=output_w,
+        channels=input_channels,
+        aligned_channels=aligned_input_ch,
+    )
+
+
+def plan_pad_unit(
+    plan: Dict[str, Any],
+    unit: Dict[str, Any],
+    value_tensors: Dict[str, str],
+    value_shapes: Dict[str, Dict[str, int]],
+) -> None:
+    raise NotImplementedError(
+        f"{unit['layer']}: standalone pad is not supported. "
+        "Only constant zero pad [0, 1, 0, 1] directly followed by maxpool2d kernel=2 stride=1 "
+        "can be fused into the NPU MAXPOOL boundary semantics."
+    )
+
+
+def plan_cat_unit(
+    plan: Dict[str, Any],
+    unit: Dict[str, Any],
+    value_tensors: Dict[str, str],
+    value_shapes: Dict[str, Dict[str, int]],
+) -> None:
+    layer_name = unit["layer"]
+    if int(unit.get("dim", 0)) != 1:
+        raise ValueError(f"{layer_name}: only channel-dimension cat (dim=1) is supported, got dim={unit.get('dim')}")
+
+    alias = plan.get("_cat_output_tensors", {}).get(str(unit.get("output")))
+    if alias is None:
+        raise NotImplementedError(f"{layer_name}: cat cannot be represented as a preplanned channel alias")
+    cat_tensor = ensure_cat_output_tensor(plan, alias)
+    for segment in alias["input_infos"]:
+        value = segment["value"]
+        tensor_name = value_tensors.get(value)
+        if tensor_name is None:
+            raise ValueError(f"{layer_name}: missing preplanned cat input {value!r}")
+        tensor = plan["tensors"][tensor_name]
+        expected_addr = addr_to_int(cat_tensor["addr"]) + int(segment["offset_bytes"])
+        if addr_to_int(tensor["addr"]) != expected_addr:
+            raise ValueError(
+                f"{layer_name}: cat input {value!r} is not placed at expected address "
+                f"{hex_addr(expected_addr)}, got {tensor['addr']}"
+            )
+
+    register_value(
+        value_tensors,
+        value_shapes,
+        unit.get("output"),
+        alias["tensor_name"],
+        height=int(alias["height"]),
+        width=int(alias["width"]),
+        channels=int(alias["channels"]),
+        aligned_channels=int(alias["aligned_channels"]),
+    )
+
+
 def plan_linear_unit(
     plan: Dict[str, Any],
     unit: Dict[str, Any],
     value_tensors: Dict[str, str],
     value_shapes: Dict[str, Dict[str, int]],
-    *,
-    is_model_output: bool,
 ) -> None:
     layer_name = unit["layer"]
     linear_index = int(unit["linear_index"])
@@ -801,11 +1367,10 @@ def plan_linear_unit(
     output_size = out_features
 
     params = add_init_region(plan, f"{layer_name}_params", parameter_size, f"coe/{layer_name}_params.coe")
-    output_tensor = add_model_output_or_runtime_region(
+    output_tensor = add_runtime_region(
         plan,
         f"{layer_name}_out",
         output_size,
-        is_model_output=is_model_output,
         channels=out_features,
         aligned_channels=out_features,
         shape=[out_features],
@@ -922,8 +1487,6 @@ def plan_conv_unit(
     unit: Dict[str, Any],
     value_tensors: Dict[str, str],
     value_shapes: Dict[str, Dict[str, int]],
-    *,
-    is_model_output: bool,
 ) -> None:
     idx = unit["layer_index"]
     conv = unit["conv"]
@@ -1008,11 +1571,14 @@ def plan_conv_unit(
     final_runtime_op = "relu" if has_relu else "dsmp" if needs_dsmp else "conv"
     for op_name, region_size, region_h, region_w in runtime_specs:
         tensor_name = f"{layer_name}_{op_name}_out"
-        runtime = add_model_output_or_runtime_region(
+        value_name = None
+        if op_name == final_runtime_op:
+            value_name = unit.get("relu_output") if has_relu else unit.get("output")
+        runtime = add_feature_region_for_value(
             plan,
+            value_name,
             tensor_name,
             region_size,
-            is_model_output=is_model_output and op_name == final_runtime_op,
             channels=out_ch,
             aligned_channels=aligned_out_ch,
             shape_nchw=[1, out_ch, region_h, region_w],
@@ -1082,6 +1648,9 @@ UNIT_PLANNERS = {
     "conv": plan_conv_unit,
     "avgpool": plan_pool_unit,
     "maxpool": plan_pool_unit,
+    "usmp": plan_usmp_unit,
+    "pad": plan_pad_unit,
+    "cat": plan_cat_unit,
     "linear": plan_linear_unit,
 }
 
@@ -1092,6 +1661,8 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
     layers = [unit for unit in units if unit["op_type"] == "conv"]
     relu_cfg = relu_config_from_ir(ir)
     input_info = ir.get("input", {})
+    outputs = model_output_items(ir)
+    cat_aliases = build_cat_aliases(ir)
 
     if cfg.IMAGE_SOURCE not in ("coe", "external"):
         raise ValueError('IMAGE_SOURCE must be "coe" or "external"')
@@ -1161,11 +1732,15 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
         },
         "model_layers": layers,
         "model_ops": ir.get("ops", []),
+        "model_output_values": outputs,
         "tensors": {},
         "execution_plan": [],
         "init_regions": [],
         "runtime_regions": [],
         "output_regions": [],
+        "aliases": [],
+        "_cat_input_aliases": cat_aliases["input_aliases"],
+        "_cat_output_tensors": cat_aliases["output_tensors"],
         "_next_init_addr": cfg.INIT_BASE_ADDR,
         "_next_runtime_addr": cfg.RUNTIME_BASE_ADDR,
     }
@@ -1189,7 +1764,9 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
         planner = UNIT_PLANNERS.get(unit["op_type"])
         if planner is None:
             raise ValueError(f"unsupported execution unit type: {unit['op_type']}")
-        planner(plan, unit, value_tensors, value_shapes, is_model_output=unit_index == len(units) - 1)
+        planner(plan, unit, value_tensors, value_shapes)
+
+    relocate_model_outputs(plan, outputs, value_tensors, value_shapes)
 
     instr_size = instr_count_for_execution_plan(plan["execution_plan"]) * cfg.INSTR_WORD_BYTES
     instr = add_init_region(plan, "instr", instr_size, "coe/instr.coe")
@@ -1206,11 +1783,11 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
             f"runtime region exceeds RUNTIME_LIMIT_ADDR: next={hex_addr(runtime_end)}, limit={hex_addr(runtime_limit_addr)}"
         )
     output_end = output_base_addr
+    if plan["output_regions"]:
+        output_end = max(addr_to_int(output_region["end_addr_exclusive"]) for output_region in plan["output_regions"])
     if enable_output_addr:
-        if len(plan["output_regions"]) != 1:
+        if not plan["output_regions"]:
             raise ValueError("ENABLE_OUTPUT_ADDR=True but no model output region was generated")
-        output_region = plan["output_regions"][0]
-        output_end = addr_to_int(output_region["end_addr_exclusive"])
         if output_end > output_limit_addr:
             raise ValueError(
                 f"model output exceeds OUTPUT_LIMIT_ADDR: next={hex_addr(output_end)}, "
@@ -1222,22 +1799,25 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
             f"ending at {hex_addr(cfg.INIT_LIMIT_ADDR)}"
         )
     if enable_output_addr:
-        validate_no_overlap(
-            output_base_addr,
-            output_end - output_base_addr,
-            cfg.INIT_BASE_ADDR,
-            init_end - cfg.INIT_BASE_ADDR,
-            "model output",
-            "init data",
-        )
-        validate_no_overlap(
-            output_base_addr,
-            output_end - output_base_addr,
-            cfg.RUNTIME_BASE_ADDR,
-            runtime_end - cfg.RUNTIME_BASE_ADDR,
-            "model output",
-            "runtime data",
-        )
+        for output_region in plan["output_regions"]:
+            output_start = addr_to_int(output_region["addr"])
+            output_size = int(output_region["size_bytes"])
+            validate_no_overlap(
+                output_start,
+                output_size,
+                cfg.INIT_BASE_ADDR,
+                init_end - cfg.INIT_BASE_ADDR,
+                "model output",
+                "init data",
+            )
+            validate_no_overlap(
+                output_start,
+                output_size,
+                cfg.RUNTIME_BASE_ADDR,
+                runtime_end - cfg.RUNTIME_BASE_ADDR,
+                "model output",
+                "runtime data",
+            )
 
     if cfg.IMAGE_SOURCE == "external":
         validate_no_overlap(
@@ -1268,7 +1848,9 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
 
     plan["init_end_addr_exclusive"] = hex_addr(init_end)
     plan["runtime_end_addr_exclusive"] = hex_addr(runtime_end)
-    plan["output_end_addr_exclusive"] = hex_addr(output_end) if enable_output_addr else None
+    plan["output_end_addr_exclusive"] = hex_addr(output_end) if plan["output_regions"] else None
+    del plan["_cat_input_aliases"]
+    del plan["_cat_output_tensors"]
     del plan["_next_init_addr"]
     del plan["_next_runtime_addr"]
     return plan

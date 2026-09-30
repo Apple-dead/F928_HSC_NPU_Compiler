@@ -48,6 +48,11 @@ SPECIAL_REGISTER_CODE = {
     "FULL_P_2": 0x0F,
     "RFULL_LOW": 0x0E,
     "RFULL_HIGH": 0x0F,
+    "USMP_P_1": 0x10,
+    "USMP_P": 0x11,
+    "USMP_P_2": 0x11,
+    "RUSMP_LOW": 0x10,
+    "RUSMP_HIGH": 0x11,
     "MADD_P": 0x13,
     "RMADD_HIGH": 0x13,
     "MMUL_P": 0x15,
@@ -62,6 +67,7 @@ COMPUTE_OPCODE = {
     "AVGPOOL": 0b001000,
     "MAXPOOL": 0b001001,
     "FULL": 0b001010,
+    "USMP": 0b001011,
 }
 
 COMPUTE_OPERAND_COUNT = {
@@ -72,11 +78,18 @@ COMPUTE_OPERAND_COUNT = {
     "AVGPOOL": 2,
     "MAXPOOL": 2,
     "FULL": 3,
+    "USMP": 2,
 }
+
+LINE_NUMBER_PREFIX_RE = re.compile(r"^\d+\s+(?=[A-Za-z_])")
 
 
 def strip_comment(line: str) -> str:
     return line.split(";", 1)[0].split("#", 1)[0].split("//", 1)[0].strip()
+
+
+def strip_line_number(line: str) -> str:
+    return LINE_NUMBER_PREFIX_RE.sub("", line, count=1)
 
 
 def split_operands(text: str) -> List[str]:
@@ -141,7 +154,7 @@ def encode_compute(mnemonic: str, operands: List[str]) -> int:
 
 
 def assemble_line(line: str) -> int | None:
-    cleaned = strip_comment(line)
+    cleaned = strip_line_number(strip_comment(line))
     if not cleaned:
         return None
 

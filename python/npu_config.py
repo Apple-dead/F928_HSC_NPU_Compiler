@@ -1,21 +1,21 @@
 ﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-INIT_BASE_ADDR = 0x00000000
-INIT_LIMIT_ADDR = 0x00200000
-RUNTIME_BASE_ADDR = 0x00200000
-RUNTIME_LIMIT_ADDR = 0xFFFFFFFF
+INIT_BASE_ADDR = 0x10000000
+INIT_LIMIT_ADDR = 0x1FFFFFFF
+RUNTIME_BASE_ADDR = 0x24000000
+RUNTIME_LIMIT_ADDR = 0x4BFFFFFF 
 
 # False: final output is allocated in runtime space. True: place it at OUTPUT_BASE_ADDR.
-ENABLE_OUTPUT_ADDR = False
+ENABLE_OUTPUT_ADDR = True
 OUTPUT_BASE_ADDR = 0x4D000000
 OUTPUT_LIMIT_ADDR = 0x50000000
 
 MODEL_FORMAT = "pt2"
-MODEL_PATH = "./model/lenet_0713_ptq_int8.pt2"
+MODEL_PATH = "./model/handmade_int8_clean.pt2"
 INTR_MOVE_PATH = "./model/intr_move.json"
 
-IMAGE_BASE_ADDR = 0x00000000
+IMAGE_BASE_ADDR = 0x10000000
 
 # IMAGE_SOURCE:
 #   "coe"      : use IMAGE_PATH as initialized input data. The input starts
@@ -37,6 +37,10 @@ INPUT_WIDTH = 28
 #    helper nodes such as clamp/to/floor are passthrough and do not count.
 INFER_PARSE_MODE = 1
 INFER_PARSE_OP_LIMIT = 6
+
+# True: if a graph output is produced by cat, export the cat inputs as model
+# outputs instead of emitting the final cat op into IR.
+EXPAND_FINAL_CAT_OUTPUTS = True
 
 INSTR_WORD_BYTES = 4
 

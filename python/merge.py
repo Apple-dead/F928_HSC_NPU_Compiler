@@ -213,7 +213,7 @@ def resolve_plan_file(path_text: str, base_dir: Path) -> Path:
     return base_dir / path
 
 
-def input_paths_from_memory_plan(memory_plan_path: Path, base_dir: Optional[Path]) -> Tuple[List[Path], List[dict]]:
+def input_paths_from_memory_plan(memory_plan_path: Path, base_dir: Optional[Path]) -> Tuple[List[Path], List[dict], dict]:
     """Read init_regions from memory_plan.json and return COE paths in planned order."""
     plan = json.loads(memory_plan_path.read_text(encoding="utf-8"))
     init_regions = plan.get("init_regions")
@@ -232,7 +232,7 @@ def input_paths_from_memory_plan(memory_plan_path: Path, base_dir: Optional[Path
         input_paths.append(resolve_plan_file(str(file_text), plan_base_dir))
         region_infos.append(region)
 
-    return input_paths, region_infos
+    return input_paths, region_infos, plan
 
 
 def write_map(
@@ -247,6 +247,7 @@ def write_map(
     output_word_bytes: int,
     output_word_endian: str,
     final_padding: int,
+    model_outputs: Optional[List[dict]] = None,
 ) -> None:
     """写出每个输入 COE 在总 COE 中的地址范围。"""
     with path.open("w", encoding="utf-8", newline="\n") as f:
@@ -300,6 +301,19 @@ def write_map(
             f.write(f"size_bytes          = 0x{size:08X} ({size})\n")
             f.write(f"end_addr            = 0x{end:08X} ({end})\n")
         f.write("-" * 80 + "\n")
+        if model_outputs:
+            f.write("\nModel outputs:\n")
+            for output in model_outputs:
+                f.write("-" * 80 + "\n")
+                f.write(f"output_index        = {output.get('index')}\n")
+                f.write(f"output_name         = {output.get('name')}\n")
+                f.write(f"output_tensor       = {output.get('tensor')}\n")
+                f.write(f"output_start_addr   = {output.get('addr')}\n")
+                f.write(f"output_size_bytes   = {output.get('size_bytes')}\n")
+                f.write(f"output_end_excl     = {output.get('end_addr_exclusive')}\n")
+                if output.get("shape") is not None:
+                    f.write(f"output_shape        = {output.get('shape')}\n")
+            f.write("-" * 80 + "\n")
         f.write(f"final_padding_bytes = 0x{final_padding:08X} ({final_padding})\n")
         f.write(f"total_size_bytes    = 0x{total_size:08X} ({total_size})\n")
         f.write(f"total_output_words  = 0x{(total_size // output_word_bytes):08X} ({total_size // output_word_bytes})\n")
@@ -395,8 +409,9 @@ def main() -> None:
         raise ValueError("--output-word-bytes 必须大于 0")
 
     region_infos: Optional[List[dict]] = None
+    memory_plan: Optional[dict] = None
     if args.memory_plan is not None:
-        input_paths, region_infos = input_paths_from_memory_plan(args.memory_plan, args.memory_plan_base_dir)
+        input_paths, region_infos, memory_plan = input_paths_from_memory_plan(args.memory_plan, args.memory_plan_base_dir)
         output_path = Path(args.coe_files[0])
     else:
         input_paths = [Path(p) for p in args.coe_files[:-1]]
@@ -484,6 +499,7 @@ def main() -> None:
         output_word_bytes=args.output_word_bytes,
         output_word_endian=args.output_word_endian,
         final_padding=final_padding,
+        model_outputs=memory_plan.get("model_outputs") if memory_plan else None,
     )
 
     print("[OK] 多 COE 拼接完成")

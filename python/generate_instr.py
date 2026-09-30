@@ -25,6 +25,7 @@ OPERATOR_PATHS = {
     "relu": PROJECT_ROOT / "operator" / "relu" / "relu.py",
     "avgpool": PROJECT_ROOT / "operator" / "avgpool" / "avgpool.py",
     "maxpool": PROJECT_ROOT / "operator" / "maxpool" / "maxpool.py",
+    "usmp": PROJECT_ROOT / "operator" / "usmp" / "usmp.py",
     "full": PROJECT_ROOT / "operator" / "full" / "full.py",
 }
 
@@ -32,6 +33,7 @@ OPERATOR_PATHS = {
 SINGLE_OPERATOR_STAGES = {
     "avgpool": ["avgpool"],
     "maxpool": ["maxpool"],
+    "usmp": ["usmp"],
 }
 
 
@@ -164,6 +166,16 @@ def build_pool_op_plan(
     return common
 
 
+def build_usmp_op_plan(
+    layer_plan: Dict[str, Any],
+    split: Dict[str, Any],
+    common: Dict[str, Any],
+    intr_moves: Dict[str, Dict[int, int]],
+) -> Dict[str, Any]:
+    common.update(split["usmp"])
+    return common
+
+
 def build_full_op_plan(
     layer_plan: Dict[str, Any],
     split: Dict[str, Any],
@@ -190,6 +202,7 @@ OP_PLAN_BUILDERS = {
     "relu": build_relu_op_plan,
     "avgpool": build_pool_op_plan,
     "maxpool": build_pool_op_plan,
+    "usmp": build_usmp_op_plan,
     "full": build_full_op_plan,
 }
 
@@ -255,6 +268,18 @@ def build_asm(memory_plan: Dict[str, Any], intr_moves: Dict[str, Dict[int, int]]
     return asm
 
 
+def add_instruction_line_numbers(lines: List[str]) -> List[str]:
+    numbered: List[str] = []
+    instruction_index = 1
+    for line in lines:
+        if assembler.assemble_line(line) is None:
+            numbered.append(line)
+            continue
+        numbered.append(f"{instruction_index}\t{line}")
+        instruction_index += 1
+    return numbered
+
+
 def write_asm(path: Path, lines: List[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -281,7 +306,7 @@ def main() -> None:
     words = assembler.assemble_lines(asm_lines)
     validate_instr_size(memory_plan, len(words))
 
-    write_asm(Path(args.asm_out), asm_lines)
+    write_asm(Path(args.asm_out), add_instruction_line_numbers(asm_lines))
     assembler.write_instr_txt(Path(args.txt_out), words)
     print(f"[OK] asm generated: {args.asm_out}")
     print(f"[OK] instr generated: {args.txt_out}")

@@ -12,6 +12,7 @@ operator/dsmp/dsmp.py
 operator/relu/relu.py
 operator/avgpool/avgpool.py
 operator/maxpool/maxpool.py
+operator/usmp/usmp.py
 operator/full/full.py
 ```
 
@@ -64,7 +65,7 @@ kernel size 是否是 NPU 支持的编码
 start_position 是否能放入字段
 ```
 
-conv/maxpool/relu 输入通道是否超过 1024、conv 输出通道如何拆分、地址空间如何分配等全局问题已经移交给 `generate_memory_plan.py`。
+conv/maxpool/relu/usmp 输入通道是否超过 1024、conv 输出通道如何拆分、地址空间如何分配等全局问题已经移交给 `generate_memory_plan.py`。
 
 ## 5. CONV 通道配置
 
@@ -170,11 +171,35 @@ stride = [1, 1]  -> step = 0
 stride = [2, 2]  -> step = 1
 ```
 
-AVGPOOL/MAXPOOL 不做任何 H/W 补零，编译器只按实际输入边长配置寄存器，并按普通 2x2、padding=0 池化公式规划输出尺寸：`out = floor((in - 2) / stride) + 1`。因此 stride=1 时输出 H/W 为输入各减 1，stride=2 时为普通 2 倍下采样结果。
+AVGPOOL/MAXPOOL 默认不做任何 H/W 补零，编译器只按实际输入边长配置寄存器，并按普通 2x2、padding=0 池化公式规划输出尺寸：`out = floor((in - 2) / stride) + 1`。特定 `pad -> maxpool2d` 融合场景会依赖 NPU 右/下边界隐式 0 语义，MAXPOOL 仍配置 pad 前输入边长，输出 H/W 与 pad 前输入一致。
 
 其他池化配置会在 memory plan 阶段报错。
 
-## 10. FULL
+## 10. USMP
+
+`operator/usmp/usmp.py` 负责生成最近邻 2 倍上采样指令片段：
+
+```asm
+CFG_REGISTER R1, LOW,  ...
+CFG_REGISTER R1, HIGH, ...
+CFG_REGISTER R2, LOW,  ...
+CFG_REGISTER R2, HIGH, ...
+CFG_REGISTER RUSMP_LOW,  ...
+CFG_REGISTER RUSMP_HIGH, ...
+USMP R1, R2
+```
+
+其中：
+
+```text
+R1 = 上采样输入地址
+R2 = 上采样输出地址
+RUSMP = 输入矩阵实际边长 + 实际输入通道数
+```
+
+USMP 当前只服务于前端识别出的 `nn.Upsample(scale_factor=2, mode="nearest")`。其他 mode 或 scale 在前端 / memory plan 阶段报错，不会进入 operator。
+
+## 11. FULL
 
 `operator/full/full.py` 负责生成全连接指令片段：
 
