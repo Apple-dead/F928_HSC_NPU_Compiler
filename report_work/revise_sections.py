@@ -1,0 +1,60 @@
+from pathlib import Path
+from copy import deepcopy
+import re,json
+from docx import Document
+from docx.shared import Pt
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+
+ROOT=Path(__file__).resolve().parent.parent
+src=ROOT/'论文中期材料/蒋一平-硕士论文中期检查报告（初稿）.docx'
+dst=ROOT/'论文中期材料/蒋一平-硕士论文中期检查报告（修订稿）.docx'
+d=Document(src)
+sections={
+'1.1 研究背景与意义':[
+'近年来，随着嵌入式系统与人工智能应用的发展，端侧设备对计算性能、资源利用效率和系统可定制性的要求不断提高。RISC-V指令集具有开放、模块化和可扩展等特点，为构建自主可控的处理器及片上系统提供了基础。基于FPGA构建集成RISC-V处理器、显示模块和神经网络处理器的SoC，能够为软硬件协同设计提供可重构的实验平台。然而，硬件功能的实现还需要操作系统、设备驱动和编译工具的配套支持。本课题以“基于RISC-V的软硬件协同及编译”为研究主题，围绕Linux系统移植及驱动开发、面向NPU的AI编译器构建与优化两个方面开展研究，以完善自研SoC的软件支持并提升其面向实际应用的运行能力。',
+'在操作系统方面，Linux具有开源、模块化和可移植性较强等特点，能够为应用程序提供进程管理、存储管理和设备访问等基础服务，是完善RISC-V软件环境的重要组成部分。针对FPGA平台资源有限、处理器运行频率受约束以及自研外设缺少配套驱动等问题，需要结合目标SoC设计轻量级引导程序，完成Linux内核、设备树和根文件系统的适配与裁剪，并为图像显示模块、NPU等外设开发相应驱动。通过对启动流程、系统组成与外设访问方式进行协同设计，可以在满足应用功能的基础上控制系统体积和启动开销，为图形交互与异构计算应用提供统一、可靠的软件运行环境。',
+'在编译器方面，神经网络通常以计算图和张量运算描述，而实验室自研NPU采用具有特定编码、数据格式和地址要求的宏指令，两者之间存在模型语义、物理布局和执行控制等方面的差异。AI编译器需要通过计算图解析、算子映射、静态存储规划与指令生成，将模型转换为目标NPU能够执行的程序。已有研究表明，图级优化与算子级映射共同影响模型在目标平台上的执行效率{cite:1}。因此，面向自研NPU构建专用离线编译器，不仅能够建立模型到硬件执行的自动转换流程，还能够结合宏指令粒度、通道对齐及张量依赖等约束，研究执行调度与存储布局的优化方法，为发挥专用加速器的计算能力提供编译支持。'
+],
+'1.3 关键技术与预期新意':[
+'Linux系统方面，关键技术包括面向自研RISC-VSoC的启动环境构建、精简SBI服务实现、Linux内核与根文件系统裁剪，以及设备树适配和定制外设驱动开发。结合开题报告中的研究方案，预期新意在于围绕FPGA平台的资源与频率约束，对引导程序、操作系统配置和外设访问进行协同设计：自主开发仅包含必要硬件初始化、内核加载及启动支持的轻量级引导程序，并结合目标应用裁剪内核与根文件系统，在功能完整性、系统体积和启动效率之间进行权衡；同时，针对图像显示模块、NPU等自研外设建立相应驱动接口，结合硬件条件组织中断响应和数据传输，支撑处理器、显示模块与加速器的协同运行，形成面向本SoC的定制化Linux软件支持方案。',
+'AI编译器方面，关键技术与预期新意主要包括两个方面。一是面向实验室自研、采用宏指令体系的NPU构建专用离线编译器，针对单条指令执行较大粒度张量操作的特点，研究计算图到宏指令执行序列的映射方法，将算子分解、通道分组、参数组织及静态地址规划相结合，在PC侧生成与目标硬件匹配的指令和参数二进制文件，建立从模型描述到RISC-VSoC中NPU执行的编译路径。二是在已有编译流程基础上，研究面向宏指令及物理布局约束的执行调度与存储联合优化，将张量生命周期、分支依赖、通道对齐和拼接别名关系纳入统一分析，联合选择合法执行顺序与缓冲区复用方案，降低中间张量的峰值存储需求，并减少具备消除条件的数据搬运。前者体现面向自研硬件的专用编译适配，后者作为后续重点研究的优化方法，通过同一硬件平台上的对照与消融实验评价其有效性。'
+]}
+
+def limits(doc,title):
+ ps=doc.paragraphs
+ start=next(i for i,p in enumerate(ps) if p.text==title and p.style.name.startswith('Heading'))
+ end=next(i for i in range(start+1,len(ps)) if ps[i].style.name.startswith('Heading'))
+ return start,end
+before=[]
+for title,newparas in sections.items():
+ s,e=limits(d,title);ps=d.paragraphs
+ old=ps[s+1:e];before.append({'section':title,'old':[p.text for p in old],'new':newparas})
+ assert len(old)==len(newparas),(title,len(old),len(newparas))
+ for p,txt in zip(old,newparas):
+  p.clear()
+  for part in re.split(r'(\{cite:\d+\})',txt):
+   if not part:continue
+   if part.startswith('{cite:'):
+    r=p.add_run('['+part[6:-1]+']');r.font.superscript=True;r.font.size=Pt(9)
+   else:p.add_run(part)
+  pr=p._p.get_or_add_pPr()
+  for name in ['autoSpaceDE','autoSpaceDN']:
+   el=pr.find(qn('w:'+name))
+   if el is None:el=OxmlElement('w:'+name);pr.append(el)
+   el.set(qn('w:val'),'0')
+d.save(dst)
+# Verify that all body paragraphs outside the two requested ranges are unchanged.
+orig=Document(src);new=Document(dst)
+skip=set()
+for title in sections:
+ s,e=limits(orig,title);skip.update(range(s+1,e))
+assert len(orig.paragraphs)==len(new.paragraphs)
+assert all(a.text==b.text for i,(a,b) in enumerate(zip(orig.paragraphs,new.paragraphs)) if i not in skip)
+assert [t._tbl.xml for t in orig.tables]==[t._tbl.xml for t in new.tables]
+for title,paras in sections.items():
+ assert all(not re.search(r'[\u4e00-\u9fff]\s+[A-Za-z]|[A-Za-z]\s+[\u4e00-\u9fff]',p) for p in paras)
+# Keep an isolated edit record rather than rebuilding the original document.
+(ROOT/'report_work/section_revision.json').write_text(json.dumps(before,ensure_ascii=False,indent=2),encoding='utf8')
+print(dst)
+print('Verified: 1.1 = 3 paragraphs; 1.3 = 2 paragraphs; other body content and tables unchanged.')
