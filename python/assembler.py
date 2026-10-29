@@ -62,7 +62,6 @@ SPECIAL_REGISTER_CODE = {
 COMPUTE_OPCODE = {
     "CONV": 0b000011,
     "DSMP": 0b000100,
-    "RELU": 0b000101,
     "MADD": 0b000111,
     "AVGPOOL": 0b001000,
     "MAXPOOL": 0b001001,
@@ -73,7 +72,6 @@ COMPUTE_OPCODE = {
 COMPUTE_OPERAND_COUNT = {
     "CONV": 3,
     "DSMP": 2,
-    "RELU": 2,
     "MADD": 3,
     "AVGPOOL": 2,
     "MAXPOOL": 2,

@@ -21,7 +21,7 @@ merge.py
 
 默认假设：
   - 输入 COE 默认是 32-bit word 粒度：1 个 memory_initialization_vector 项 = 4 byte；
-  - 输出总 COE 默认也是 32-bit word 粒度：1 个 memory_initialization_vector 项 = 4 byte；
+  - 输出总 COE 默认是 512-bit word 粒度：1 个 memory_initialization_vector 项 = 64 byte；
   - word 内部默认 little-endian 解释/打包，即低地址 byte 在右边/低 8 位。
 
 例如：
@@ -39,6 +39,8 @@ import json
 import re
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+from memory_layout import BRAM_WORD_BYTES, INTERMEDIATE_COE_WORD_BYTES
 
 
 COE_HEADER_RE = re.compile(r"memory_initialization_radix\s*=\s*(\d+)\s*;?", re.IGNORECASE)
@@ -322,7 +324,7 @@ def write_map(
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "将任意多个输入 COE 按命令行顺序拼接成一个 32-bit word 粒度总 COE。"
+            "将输入 COE 按字节顺序合并，默认输出 512-bit word 粒度总 COE。"
             "用法：python merge.py xx1.coe xx2.coe ... xxn.coe target.coe"
         )
     )
@@ -355,7 +357,7 @@ def main() -> None:
     parser.add_argument(
         "--input-word-bytes",
         type=int,
-        default=4,
+        default=INTERMEDIATE_COE_WORD_BYTES,
         help="所有输入 COE 的每个初始化项包含几个 byte，默认 4，即输入为 32-bit word COE。旧版 byte COE 请设为 1。",
     )
     parser.add_argument(
@@ -367,8 +369,8 @@ def main() -> None:
     parser.add_argument(
         "--output-word-bytes",
         type=int,
-        default=4,
-        help="输出 COE 的每个初始化项包含几个 byte，默认 4，即输出 32-bit word COE。",
+        default=BRAM_WORD_BYTES,
+        help="输出 COE 每个初始化项的字节数，默认 64，即 512-bit；不改变区域的 4-byte 对齐。",
     )
     parser.add_argument(
         "--output-word-endian",

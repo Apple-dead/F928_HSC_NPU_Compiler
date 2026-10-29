@@ -11,6 +11,8 @@ from typing import List, Tuple
 
 import numpy as np
 
+from memory_layout import CONV_MAX_OUTPUT_CHANNELS, aligned_channels
+
 
 NUMBER_RE = re.compile(r"[-+]?(?:\d+\.\d*|\d*\.\d+|\d+)(?:[eE][-+]?\d+)?")
 LAYER_WEIGHT_RE = re.compile(r"^layer(?P<layer>\d+)_weight$")
@@ -35,12 +37,6 @@ def load_json(path: Path) -> dict:
     if not path.is_file():
         raise FileNotFoundError(f"JSON file does not exist: {path}")
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def align_up(value: int, alignment: int = 4) -> int:
-    if value <= 0:
-        raise ValueError("channel count must be positive")
-    return ((value + alignment - 1) // alignment) * alignment
 
 
 def check_int8_range(values: np.ndarray) -> None:
@@ -74,17 +70,14 @@ def write_coe(words: List[int], output_path: Path, values_per_line: int = 1) -> 
             f.write(", ".join(chunk) + (";\n" if is_last else ",\n"))
 
 
-def npu_channel_groups(out_ch: int, aligned_out_ch: int, max_channels: int = 8) -> List[Tuple[int, int, int, bool]]:
-    groups: List[Tuple[int, int, int, bool]] = []
-    start = 0
-    while start < aligned_out_ch:
-        remaining_valid = max(0, out_ch - start)
-        group_size = max_channels if remaining_valid >= max_channels else align_up(max(remaining_valid, 1), 4)
-        group_size = min(group_size, aligned_out_ch - start)
-        valid_count = max(0, min(out_ch - start, group_size))
-        groups.append((start, group_size, valid_count, valid_count < group_size))
-        start += group_size
-    return groups
+def npu_channel_groups(
+    out_ch: int, aligned_out_ch: int, max_channels: int = CONV_MAX_OUTPUT_CHANNELS,
+) -> List[Tuple[int, int, int, bool]]:
+    if not 1 <= out_ch <= max_channels:
+        raise NotImplementedError(f"pixel-interleaved Conv currently supports 1..{max_channels} output channels")
+    if aligned_out_ch != aligned_channels(out_ch):
+        raise ValueError(f"expected 8-channel padding for {out_ch}, got {aligned_out_ch}")
+    return [(0, aligned_out_ch, out_ch, out_ch < aligned_out_ch)]
 
 
 def convert_weights(
@@ -105,18 +98,17 @@ def convert_weights(
         )
 
     check_int8_range(flat_values)
-    pad_in_ch = align_up(in_ch, 4)
+    pad_in_ch = aligned_channels(in_ch)
     original = flat_values.reshape(out_ch, in_ch, kernel_h, kernel_w)
     padded = np.zeros((out_ch, pad_in_ch, kernel_h, kernel_w), dtype=np.int64)
     padded[:out_ch, :in_ch, :, :] = original
 
     emitted: List[int] = []
     for oc in range(out_ch):
-        for ic_base in range(0, pad_in_ch, 4):
-            for kh in range(kernel_h):
-                for kw in range(kernel_w):
-                    for ic in range(ic_base, ic_base + 4):
-                        emitted.append(signed_to_unsigned_twos_complement(int(padded[oc, ic, kh, kw])))
+        for kh in range(kernel_h):
+            for kw in range(kernel_w):
+                for ic in range(pad_in_ch):
+                    emitted.append(signed_to_unsigned_twos_complement(int(padded[oc, ic, kh, kw])))
     return emitted, pad_in_ch, out_ch
 
 
@@ -176,7 +168,7 @@ def main() -> None:
         words = bytes_to_words(units)
         write_coe(words, output_path)
 
-        aligned_out_ch = align_up(out_ch, 4)
+        aligned_out_ch = aligned_channels(out_ch)
         groups = npu_channel_groups(out_ch, aligned_out_ch)
         bytes_per_output_channel = pad_in_ch * kernel_h * kernel_w
 

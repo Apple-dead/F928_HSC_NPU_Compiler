@@ -24,6 +24,9 @@ IMAGE_BASE_ADDR = 0x10000000
 #                map is already available at IMAGE_BASE_ADDR, and initialized
 #                params/instructions start at INIT_BASE_ADDR.
 IMAGE_SOURCE = "coe"
+# Input COE is a 32-bit intermediate file using per-pixel all-channel order,
+# padded to 8 channels. Regenerate old 4-channel COEs before building.
+# Only the final target/all.coe is packed into 512-bit entries.
 IMAGE_PATH = "./coe/image.coe"
 
 # Fallback input size only. The PT2 frontend and memory planner prefer input
@@ -44,7 +47,6 @@ EXPAND_FINAL_CAT_OUTPUTS = True
 
 INSTR_WORD_BYTES = 4
 
-# If either a layer input feature map or output feature map has at least this
-# many stored elements (width * height * aligned_channels), split output
-# channels only in 4-channel groups instead of the default 8-then-4 grouping.
-CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD = 256 * 256 * 4
+# Feature maps store all channels per pixel and pad channels to a multiple of
+# 8. CONV handles up to 32 output channels in one pass; old 4/8-channel output
+# splitting and its feature-size threshold no longer apply.

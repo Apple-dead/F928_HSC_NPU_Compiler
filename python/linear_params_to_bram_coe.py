@@ -37,8 +37,8 @@ def convert_linear_weights(
         raise ValueError(
             f"aligned_input_channels={aligned_input_channels} must be >= input_channels={input_channels}"
         )
-    if aligned_input_channels % 4 != 0:
-        raise ValueError(f"FULL input channels must be padded to a multiple of 4, got {aligned_input_channels}")
+    if aligned_input_channels % 8 != 0:
+        raise ValueError(f"FULL input channels must be padded to a multiple of 8, got {aligned_input_channels}")
 
     check_int8_range(flat_values)
     original = flat_values.reshape(out_features, in_features)
@@ -46,22 +46,22 @@ def convert_linear_weights(
         (out_features, aligned_input_channels, input_height, input_width),
         dtype=np.int64,
     )
-    padded[:, :input_channels, :input_height, :input_width].reshape(
-        out_features,
-        actual_features,
-    )[:, :in_features] = original
+    logical = np.zeros((out_features, actual_features), dtype=np.int64)
+    logical[:, :in_features] = original
+    padded[:, :input_channels, :, :] = logical.reshape(
+        out_features, input_channels, input_height, input_width
+    )
 
     emitted: List[int] = []
     for output_index in range(out_features):
-        for channel_base in range(0, aligned_input_channels, 4):
-            for row in range(input_height):
-                for col in range(input_width):
-                    for channel in range(channel_base, channel_base + 4):
-                        emitted.append(
-                            signed_to_unsigned_twos_complement(
-                                int(padded[output_index, channel, row, col])
-                            )
+        for row in range(input_height):
+            for col in range(input_width):
+                for channel in range(aligned_input_channels):
+                    emitted.append(
+                        signed_to_unsigned_twos_complement(
+                            int(padded[output_index, channel, row, col])
                         )
+                    )
     return emitted
 
 

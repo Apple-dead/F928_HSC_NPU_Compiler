@@ -50,7 +50,7 @@ python .\python\instr_txt_to_bram_coe.py "%INSTR_PATH%" "%INSTR_COE_PATH%"
 if errorlevel 1 exit /b 1
 
 rem merge coe
-python .\python\merge.py --memory-plan .\data\memory_plan.json "%TARGET_COE_PATH%"
+python .\python\merge.py --memory-plan .\data\memory_plan.json "%TARGET_COE_PATH%" --output-word-bytes 64
 if errorlevel 1 exit /b 1
 
 rem export DDR binary images

@@ -68,7 +68,7 @@ python ./python/params_to_bram_coe.py --memory-plan ./data/memory_plan.json --mo
 python ./python/instr_txt_to_bram_coe.py "$INSTR_PATH" "$INSTR_COE_PATH"
 
 #merge coe
-python ./python/merge.py --memory-plan ./data/memory_plan.json "$TARGET_COE_PATH"
+python ./python/merge.py --memory-plan ./data/memory_plan.json "$TARGET_COE_PATH" --output-word-bytes 64
 
 #export DDR binary images
 python ./python/coe_to_bin/export_npu_bins.py --memory-plan ./data/memory_plan.json --out-dir ./target

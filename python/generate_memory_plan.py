@@ -11,6 +11,10 @@ from typing import Any, Dict, List
 import merge as coe_merge
 import npu_config as cfg
 from frontend.ir_schema import BACKEND_SUPPORTED_OPS
+from memory_layout import (
+    BRAM_WORD_BYTES, CHANNEL_ALIGNMENT, CONV_MAX_OUTPUT_CHANNELS,
+    FEATURE_LAYOUT, aligned_channels,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -31,10 +35,6 @@ def align_up(value: int, alignment: int = 4) -> int:
 
 def hex_addr(value: int) -> str:
     return f"0x{value:08X}"
-
-
-def aligned_channels(channels: int, alignment: int = 4) -> int:
-    return align_up(channels, alignment)
 
 
 def region(name: str, addr: int, size: int, **extra: Any) -> Dict[str, Any]:
@@ -109,21 +109,6 @@ def conv_output_hw(height: int, width: int, conv: Dict[str, Any]) -> tuple[int, 
     return out_h, out_w
 
 
-def channel_group_max_channels(
-    *,
-    input_h: int,
-    input_w: int,
-    aligned_in_ch: int,
-    output_h: int,
-    output_w: int,
-    aligned_out_ch: int,
-) -> int:
-    input_size = feature_map_elements(input_h, input_w, aligned_in_ch)
-    output_size = feature_map_elements(output_h, output_w, aligned_out_ch)
-    threshold = cfg.CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD
-    return 4 if input_size >= threshold or output_size >= threshold else 8
-
-
 def instr_count_for_execution_plan(execution_plan: List[Dict[str, Any]]) -> int:
     total = 1
     for stage in execution_plan:
@@ -137,9 +122,9 @@ def instr_count_for_execution_plan(execution_plan: List[Dict[str, Any]]) -> int:
             for split in stage.get("splits", []):
                 if "conv" in split:
                     total += 11
+                    if stage.get("activation") == "relu":
+                        total += 2  # RRELU low/high, before the fused CONV.
             if "dsmp" in stage:
-                total += 7
-            if "relu" in stage:
                 total += 7
             continue
         for split in stage.get("splits", []):
@@ -194,25 +179,20 @@ def addr_to_int(addr: str) -> int:
     return int(addr, 16)
 
 
-def npu_channel_groups(out_ch: int, aligned_out_ch: int, max_channels: int = 8) -> List[Dict[str, Any]]:
-    groups: List[Dict[str, Any]] = []
-    start = 0
-    while start < aligned_out_ch:
-        remaining_valid = max(0, out_ch - start)
-        group_channels = max_channels if remaining_valid >= max_channels else align_up(max(remaining_valid, 1), 4)
-        group_channels = min(group_channels, aligned_out_ch - start)
-        valid_channels = max(0, min(out_ch - start, group_channels))
-        groups.append(
-            {
-                "group_index": len(groups),
-                "start_channel": start,
-                "channels": group_channels,
-                "valid_channels": valid_channels,
-                "has_padding": valid_channels < group_channels,
-            }
+def npu_channel_groups(
+    out_ch: int, aligned_out_ch: int, max_channels: int = CONV_MAX_OUTPUT_CHANNELS,
+) -> List[Dict[str, Any]]:
+    if not 1 <= out_ch <= max_channels:
+        raise NotImplementedError(
+            f"conv output channels must be in [1, {max_channels}] for pixel-interleaved storage; "
+            f"got {out_ch}. Multi-pass output needs an NPU channel-stride/writeback definition."
         )
-        start += group_channels
-    return groups
+    if aligned_out_ch != aligned_channels(out_ch):
+        raise ValueError(f"expected 8-channel padding for {out_ch}, got {aligned_out_ch}")
+    return [{
+        "group_index": 0, "start_channel": 0, "channels": aligned_out_ch,
+        "valid_channels": out_ch, "has_padding": out_ch != aligned_out_ch,
+    }]
 
 
 def build_layer_execution_plan(
@@ -237,7 +217,6 @@ def build_layer_execution_plan(
     has_relu: bool,
     conv_out_tensor: Dict[str, Any],
     dsmp_out_tensor: Dict[str, Any] | None,
-    relu_out_tensor: Dict[str, Any] | None,
     conv_out_h: int,
     conv_out_w: int,
 ) -> Dict[str, Any]:
@@ -250,27 +229,19 @@ def build_layer_execution_plan(
     has_dsmp = dsmp_out_tensor is not None
     input_feature_elements = feature_map_elements(input_h, input_w, aligned_in_ch)
     output_feature_elements = feature_map_elements(out_h, out_w, aligned_out_ch)
-    max_group_channels = channel_group_max_channels(
-        input_h=input_h,
-        input_w=input_w,
-        aligned_in_ch=aligned_in_ch,
-        output_h=out_h,
-        output_w=out_w,
-        aligned_out_ch=aligned_out_ch,
-    )
+    max_group_channels = CONV_MAX_OUTPUT_CHANNELS
     splits: List[Dict[str, Any]] = []
 
-    # Physical parameter layout is, per group: valid weights, then padded bias
-    # only when the source Conv2d has bias.
+    # Each valid output has weights followed by int32 LE bias and four zero bytes.
     parameter_offset = 0
     for group in npu_channel_groups(out_ch, aligned_out_ch, max_channels=max_group_channels):
         start_channel = group["start_channel"]
         conv_feature_offset = start_channel * bytes_per_conv_feature_channel
         feature_offset = start_channel * bytes_per_feature_channel
         weight_size = group["valid_channels"] * bytes_per_weight_output_channel
-        bias_size = group["channels"] * 4 if has_bias else 0
+        bias_size = group["valid_channels"] * 8 if has_bias else 0
         weight_offset = parameter_offset
-        bias_offset = weight_offset + weight_size if has_bias else None
+        bias_offset = weight_offset + bytes_per_weight_output_channel if has_bias else None
         conv_feature_size = group["channels"] * bytes_per_conv_feature_channel
         feature_size = group["channels"] * bytes_per_feature_channel
         item = dict(group)
@@ -294,12 +265,13 @@ def build_layer_execution_plan(
             "output_addr": hex_addr(addr_to_int(conv_out_tensor["addr"]) + conv_feature_offset),
             "has_bias": has_bias,
         }
+        item["parameter_record_stride_bytes"] = bytes_per_weight_output_channel + (8 if has_bias else 0)
         item["bias_addr"] = hex_addr(addr_to_int(weight_tensor["addr"]) + bias_offset) if has_bias else None
 
         splits.append(item)
         parameter_offset += weight_size + bias_size
 
-    expected_parameter_size = out_ch * bytes_per_weight_output_channel + (aligned_out_ch * 4 if has_bias else 0)
+    expected_parameter_size = out_ch * bytes_per_weight_output_channel + (out_ch * 8 if has_bias else 0)
     if parameter_offset != expected_parameter_size:
         raise ValueError(
             f"{layer_name}: parameter layout size mismatch: "
@@ -309,12 +281,14 @@ def build_layer_execution_plan(
     layer_plan = {
         "conv_index": conv_index,
         "layer": layer_name,
-        "npu_max_channels_per_pass": 8,
+        "npu_max_channels_per_pass": CONV_MAX_OUTPUT_CHANNELS,
         "channel_group_max_channels": max_group_channels,
-        "channel_group4_feature_size_threshold": cfg.CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD,
         "input_feature_elements": input_feature_elements,
         "output_feature_elements": output_feature_elements,
-        "channel_alignment": 4,
+        "channel_alignment": CHANNEL_ALIGNMENT,
+        "feature_layout": FEATURE_LAYOUT,
+        "activation": "relu" if has_relu else "none",
+        "dtype": "INT8",
         "input_channels": in_ch,
         "output_channels": out_ch,
         "aligned_input_channels": aligned_in_ch,
@@ -332,28 +306,17 @@ def build_layer_execution_plan(
             "conv_out": {
                 "addr": conv_out_tensor["addr"],
                 "size_bytes": conv_out_tensor["size_bytes"],
-                "layout": "channel_groups_are_tightly_packed",
+                "layout": FEATURE_LAYOUT,
             },
             **(
                 {
                     "dsmp_out": {
                         "addr": dsmp_out_tensor["addr"],
                         "size_bytes": dsmp_out_tensor["size_bytes"],
-                        "layout": "channel_groups_are_tightly_packed",
+                        "layout": FEATURE_LAYOUT,
                     }
                 }
                 if dsmp_out_tensor is not None
-                else {}
-            ),
-            **(
-                {
-                    "relu_out": {
-                        "addr": relu_out_tensor["addr"],
-                        "size_bytes": relu_out_tensor["size_bytes"],
-                        "layout": "channel_groups_are_tightly_packed",
-                    }
-                }
-                if relu_out_tensor is not None
                 else {}
             ),
         },
@@ -375,15 +338,11 @@ def build_layer_execution_plan(
             "feature_size": conv_out_w,
             "channels": out_ch,
         }
-        relu_input_addr = dsmp_out_tensor["addr"]
-    else:
-        relu_input_addr = conv_out_tensor["addr"]
-    if relu_out_tensor is not None:
+    if has_relu:
         layer_plan["relu"] = {
-            "input_addr": relu_input_addr,
-            "output_addr": relu_out_tensor["addr"],
-            "feature_size": out_w,
+            "feature_size": conv_out_w,
             "channels": out_ch,
+            "fused_into": "conv",
         }
     return layer_plan
 
@@ -406,9 +365,9 @@ def build_pool_execution_plan(
         raise NotImplementedError(
             f"{layer_name}: {op_name} input channels > 1024 are not supported by current register format."
         )
-    if aligned_input_channels % 4 != 0:
+    if aligned_input_channels % CHANNEL_ALIGNMENT != 0:
         raise ValueError(
-            f"{layer_name}: pool input aligned channels must be a multiple of 4, got {aligned_input_channels}"
+            f"{layer_name}: pool input aligned channels must be a multiple of 8, got {aligned_input_channels}"
         )
 
     input_size = aligned_input_channels * input_h * input_w
@@ -442,7 +401,8 @@ def build_pool_execution_plan(
     return {
         "op_type": op_name,
         "layer": layer_name,
-        "channel_alignment": 4,
+        "channel_alignment": CHANNEL_ALIGNMENT,
+        "feature_layout": FEATURE_LAYOUT,
         "pool_channel_unit": "all_input_channels",
         "input_channels": input_channels,
         "output_channels": input_channels,
@@ -457,7 +417,7 @@ def build_pool_execution_plan(
             "pool_out": {
                 "addr": output_tensor["addr"],
                 "size_bytes": output_tensor["size_bytes"],
-                "layout": "channel_groups_are_tightly_packed",
+                "layout": FEATURE_LAYOUT,
             },
         },
         "splits": splits,
@@ -521,7 +481,8 @@ def build_usmp_execution_plan(
     return {
         "op_type": "usmp",
         "layer": layer_name,
-        "channel_alignment": 4,
+        "channel_alignment": CHANNEL_ALIGNMENT,
+        "feature_layout": FEATURE_LAYOUT,
         "usmp_channel_unit": "all_input_channels",
         "input_channels": input_channels,
         "output_channels": input_channels,
@@ -536,7 +497,7 @@ def build_usmp_execution_plan(
             "usmp_out": {
                 "addr": output_tensor["addr"],
                 "size_bytes": output_tensor["size_bytes"],
-                "layout": "channel_groups_are_tightly_packed",
+                "layout": FEATURE_LAYOUT,
             },
         },
         "splits": splits,
@@ -609,6 +570,10 @@ def build_cat_aliases(ir: Dict[str, Any]) -> Dict[str, Any]:
             continue
         height = int(cat_shape["height"])
         width = int(cat_shape["width"])
+        # With HWC storage, whole-buffer channel concatenation aliases only a
+        # single spatial position. Larger maps require pixel-strided writes.
+        if height * width != 1:
+            continue
         output_channels = int(cat_shape["channels"])
         aligned_output_ch = int(cat_shape["aligned_channels"])
         if output_channels != aligned_output_ch:
@@ -678,7 +643,7 @@ def ensure_cat_output_tensor(plan: Dict[str, Any], alias: Dict[str, Any]) -> Dic
         aligned_channels=int(alias["aligned_channels"]),
         shape_nchw=[1, int(alias["channels"]), int(alias["height"]), int(alias["width"])],
         aligned_shape_nchw=[1, int(alias["aligned_channels"]), int(alias["height"]), int(alias["width"])],
-        layout="channel_concat_alias_4channel_pixel_interleaved",
+        layout=FEATURE_LAYOUT,
     )
     plan["tensors"][tensor_name] = runtime
     plan.setdefault("aliases", []).append(
@@ -700,6 +665,7 @@ def add_feature_region_for_value(
     size: int,
     **extra: Any,
 ) -> Dict[str, Any]:
+    extra.setdefault("layout", FEATURE_LAYOUT)
     alias = plan.get("_cat_input_aliases", {}).get(str(value_name)) if value_name is not None else None
     if alias is None:
         return add_runtime_region(plan, tensor_name, size, **extra)
@@ -803,7 +769,7 @@ def relocate_model_outputs(
             shape_nchw=tensor.get("shape_nchw"),
             aligned_shape_nchw=tensor.get("aligned_shape_nchw"),
             shape=tensor.get("shape"),
-            layout=tensor.get("layout", "channel_groups_are_tightly_packed"),
+            layout=tensor.get("layout", FEATURE_LAYOUT),
         )
         replacements.append((old_base, cursor, size))
         tensor.update(
@@ -844,7 +810,9 @@ def validate_input_coe_size(file_text: str, expected_size: int, expected_shape: 
         raise ValueError(
             f"{path}: input COE size mismatch for start-layer input; "
             f"file has {actual_size} bytes ({len(values)} 32-bit words), "
-            f"expected {expected_size} bytes for aligned_shape_nchw={expected_shape}"
+            f"expected {expected_size} bytes for aligned_shape_nchw={expected_shape}. "
+            "Input COE must use per-pixel all-channel order padded to 8 channels; "
+            "regenerate legacy 4-channel input COEs. Intermediate COEs remain 32-bit."
         )
 
 
@@ -886,6 +854,7 @@ def parse_conv_unit(ops: List[Dict[str, Any]], index: int, units: List[Dict[str,
                 "Current backend only supports relu directly after its producer conv2d."
             )
         unit["has_relu"] = True
+        unit["relu"] = {"tan": int(relu.get("tan", 8))}
         unit["relu_output"] = relu.get("output")
         next_index += 1
     return unit, next_index
@@ -1302,7 +1271,11 @@ def plan_cat_unit(
 
     alias = plan.get("_cat_output_tensors", {}).get(str(unit.get("output")))
     if alias is None:
-        raise NotImplementedError(f"{layer_name}: cat cannot be represented as a preplanned channel alias")
+        raise NotImplementedError(
+            f"{layer_name}: channel cat cannot use whole-buffer aliases with the new pixel-interleaved "
+            "layout. Only 1x1 maps with unpadded input channel segments can alias; "
+            "larger maps require an NPU pixel-strided write/copy instruction."
+        )
     cat_tensor = ensure_cat_output_tensor(plan, alias)
     for segment in alias["input_infos"]:
         value = segment["value"]
@@ -1384,7 +1357,7 @@ def plan_linear_unit(
         "input_aligned_shape_nchw": [1, aligned_input_ch, input_h, input_w],
         "size_bytes": out_features * input_bytes,
         "parameter_region": f"{layer_name}_params",
-        "layout": "per_output_4channel_pixel_interleaved",
+        "layout": "per_output_pixel_interleaved_all_input_channels_padded_to_8",
     }
     if has_bias:
         plan["tensors"][f"{layer_name}_bias"] = {
@@ -1498,6 +1471,7 @@ def plan_conv_unit(
     validate_feature_hw(height, width)
     in_ch = conv["in_channels"]
     out_ch = conv["out_channels"]
+    npu_channel_groups(out_ch, aligned_channels(out_ch))
     if in_ch != int(input_shape["channels"]):
         raise ValueError(
             f"{layer_name} in_channels={in_ch} does not match input {unit.get('input')} channels="
@@ -1519,7 +1493,7 @@ def plan_conv_unit(
 
     weight_size = out_ch * aligned_in_ch * kh * kw
     has_bias = bool(conv.get("has_bias", False))
-    bias_size = aligned_out_ch * 4 if has_bias else 0
+    bias_size = out_ch * 8 if has_bias else 0
     parameter_size = weight_size + bias_size
     conv_output_size = conv_out_h * conv_out_w * aligned_out_ch
     output_size = out_h * out_w * aligned_out_ch
@@ -1533,19 +1507,24 @@ def plan_conv_unit(
         "storage_shape_oihw": [out_ch, aligned_in_ch, kh, kw],
         "size_bytes": weight_size,
         "parameter_region": f"{layer_name}_params",
+        "layout": "output_channel_then_kernel_hw_then_all_input_channels_padded_to_8",
+        "stride_bytes": aligned_in_ch * kh * kw + (8 if has_bias else 0),
     }
     plan["tensors"][f"{layer_name}_weight"] = weight_tensor
 
     if has_bias:
         bias_tensor = {
-            "addr": params["addr"],
+            "addr": hex_addr(addr_to_int(params["addr"]) + aligned_in_ch * kh * kw),
             "channels": out_ch,
             "aligned_channels": aligned_out_ch,
             "shape": [out_ch],
-            "storage_shape": [aligned_out_ch],
+            "storage_shape": [out_ch, 8],
+            "stride_bytes": aligned_in_ch * kh * kw + 8,
+            "value_size_bytes": 4,
+            "padding_bytes_per_value": 4,
             "size_bytes": bias_size,
             "parameter_region": f"{layer_name}_params",
-            "layout": "int32_bias_values_padded_per_output_channel_group",
+            "layout": "strided_int32_le_bias_then_32_zero_bits",
         }
         plan["tensors"][f"{layer_name}_bias"] = bias_tensor
     plan["tensors"][f"{layer_name}_params"] = {
@@ -1553,7 +1532,7 @@ def plan_conv_unit(
         "size_bytes": parameter_size,
         "has_bias": has_bias,
         "layout": (
-            "weight_then_padded_int32_bias_per_output_channel_group"
+            "per_output_weight_then_int32_le_bias_then_32_zero_bits"
             if has_bias
             else "weight_only_per_output_channel_group"
         ),
@@ -1565,10 +1544,8 @@ def plan_conv_unit(
     ]
     if needs_dsmp:
         runtime_specs.append(("dsmp", output_size, out_h, out_w))
-    if has_relu:
-        runtime_specs.append(("relu", output_size, out_h, out_w))
-
-    final_runtime_op = "relu" if has_relu else "dsmp" if needs_dsmp else "conv"
+    # Activation runs inside CONV and writes directly into its output buffer.
+    final_runtime_op = "dsmp" if needs_dsmp else "conv"
     for op_name, region_size, region_h, region_w in runtime_specs:
         tensor_name = f"{layer_name}_{op_name}_out"
         value_name = None
@@ -1587,36 +1564,36 @@ def plan_conv_unit(
         plan["tensors"][tensor_name] = runtime
         runtime_tensors[op_name] = runtime
 
-    plan["execution_plan"].append(
-        build_layer_execution_plan(
-            conv_index=int(unit["conv_index"]),
-            layer_name=layer_name,
-            in_ch=in_ch,
-            out_ch=out_ch,
-            aligned_in_ch=aligned_in_ch,
-            aligned_out_ch=aligned_out_ch,
-            kh=kh,
-            kw=kw,
-            padding=conv["padding"],
-            stride=conv["stride"],
-            input_h=height,
-            input_w=width,
-            out_h=out_h,
-            out_w=out_w,
-            input_tensor=plan["tensors"][input_tensor_name],
-            weight_tensor=weight_tensor,
-            has_bias=has_bias,
-            has_relu=has_relu,
-            conv_out_tensor=runtime_tensors["conv"],
-            dsmp_out_tensor=runtime_tensors.get("dsmp"),
-            relu_out_tensor=runtime_tensors.get("relu"),
-            conv_out_h=conv_out_h,
-            conv_out_w=conv_out_w,
-        )
+    layer_plan = build_layer_execution_plan(
+        conv_index=int(unit["conv_index"]),
+        layer_name=layer_name,
+        in_ch=in_ch,
+        out_ch=out_ch,
+        aligned_in_ch=aligned_in_ch,
+        aligned_out_ch=aligned_out_ch,
+        kh=kh,
+        kw=kw,
+        padding=conv["padding"],
+        stride=conv["stride"],
+        input_h=height,
+        input_w=width,
+        out_h=out_h,
+        out_w=out_w,
+        input_tensor=plan["tensors"][input_tensor_name],
+        weight_tensor=weight_tensor,
+        has_bias=has_bias,
+        has_relu=has_relu,
+        conv_out_tensor=runtime_tensors["conv"],
+        dsmp_out_tensor=runtime_tensors.get("dsmp"),
+        conv_out_h=conv_out_h,
+        conv_out_w=conv_out_w,
     )
-
     if has_relu:
-        output_tensor_name = f"{layer_name}_relu_out"
+        layer_plan["relu"].update(unit.get("relu", {}))
+    plan["execution_plan"].append(layer_plan)
+
+    output_tensor_name = f"{layer_name}_{final_runtime_op}_out"
+    if has_relu:
         register_value(
             value_tensors,
             value_shapes,
@@ -1627,10 +1604,6 @@ def plan_conv_unit(
             channels=out_ch,
             aligned_channels=aligned_out_ch,
         )
-    elif needs_dsmp:
-        output_tensor_name = f"{layer_name}_dsmp_out"
-    else:
-        output_tensor_name = f"{layer_name}_conv_out"
 
     register_value(
         value_tensors,
@@ -1714,11 +1687,13 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
             "INPUT_WIDTH": cfg.INPUT_WIDTH,
             "INFER_PARSE_MODE": cfg.INFER_PARSE_MODE,
             "INFER_PARSE_OP_LIMIT": cfg.INFER_PARSE_OP_LIMIT,
-            "CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD": cfg.CHANNEL_GROUP4_FEATURE_SIZE_THRESHOLD,
             "model_ir": str(model_ir_path),
         },
         "relu": relu_cfg,
         "alignment_bytes": 4,
+        "channel_alignment": CHANNEL_ALIGNMENT,
+        "feature_layout": FEATURE_LAYOUT,
+        "bram_word_bytes": BRAM_WORD_BYTES,
         "image": {
             "source": cfg.IMAGE_SOURCE,
             "addr": hex_addr(image_addr),
@@ -1729,6 +1704,7 @@ def build_plan(model_ir_path: Path = DEFAULT_MODEL_IR) -> Dict[str, Any]:
             "aligned_shape_nchw": input_aligned_shape,
             "size_bytes": image_size,
             "file": image_file,
+            "layout": FEATURE_LAYOUT,
         },
         "model_layers": layers,
         "model_ops": ir.get("ops", []),

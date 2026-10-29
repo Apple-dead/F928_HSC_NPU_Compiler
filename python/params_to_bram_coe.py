@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Generate physical per-layer parameter COEs: weights then bias per <=8-channel group."""
+"""Generate Conv parameters: per output, HWC8 weights then int32 LE bias + 4 zero bytes.
+
+No dummy output-channel parameter records are stored. Linear keeps its own layout.
+"""
 
 from __future__ import annotations
 
@@ -28,14 +31,12 @@ def build_layer_bytes(layer_plan: dict, weight_tensor: dict, raw_weights, raw_bi
     for group in layer_plan["splits"]:
         start = int(group["start_channel"])
         valid = int(group["valid_channels"])
-        channels = int(group["channels"])
-        weight_start = start * bytes_per_output
-        weight_end = weight_start + valid * bytes_per_output
-        result.extend(weight_units[weight_start:weight_end])
-        if has_bias:
-            for word in bias_words[start : start + valid]:
-                result.extend(word.to_bytes(4, byteorder="little", signed=False))
-            result.extend(b"\x00" * ((channels - valid) * 4))
+        for oc in range(start, start + valid):
+            weight_start = oc * bytes_per_output
+            result.extend(weight_units[weight_start:weight_start + bytes_per_output])
+            if has_bias:
+                result.extend(bias_words[oc].to_bytes(4, byteorder="little", signed=False))
+                result.extend(b"\x00" * 4)
 
     return result
 

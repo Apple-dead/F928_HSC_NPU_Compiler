@@ -130,6 +130,8 @@ def build_conv_op_plan(
             "input_channels": layer_plan["input_channels"],
             "output_channels": split["valid_channels"],
             "has_bias": bool(split["conv"].get("has_bias", False)),
+            "activation": layer_plan.get("activation", "none"),
+            "dtype": "INT8",
             "start_position": get_start_position(intr_moves, "CONV_MOVE_BY_INDEX", conv_index, "conv"),
         }
     )
@@ -237,8 +239,6 @@ def layer_operator_sequence(layer_plan: Dict[str, Any]) -> List[str]:
     ops: List[str] = []
     if "dsmp" in layer_plan:
         ops.append("dsmp")
-    if "relu" in layer_plan:
-        ops.append("relu")
     return ops
 
 
@@ -256,6 +256,9 @@ def build_asm(memory_plan: Dict[str, Any], intr_moves: Dict[str, Dict[int, int]]
             asm.append(f"; -- group{split['group_index']} ch{split['start_channel']}+{split['channels']} --")
             for op in stage_operator_sequence(layer_plan, split):
                 op_plan = build_op_plan(layer_plan, split, op, intr_moves)
+                if op == "conv" and op_plan["activation"] == "relu":
+                    relu_plan = build_op_plan(layer_plan, split, "relu", intr_moves)
+                    op_plan["activation_config_asm"] = operators["relu"].compile_op(relu_plan, memory_plan)
                 asm.extend(operators[op].compile_op(op_plan, memory_plan))
                 asm.append("")
         layer_split = (layer_plan.get("splits") or [{}])[0]

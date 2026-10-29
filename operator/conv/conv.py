@@ -24,6 +24,14 @@ STRIDE_TO_STEP_CODE = {
     (2, 2): 1,
 }
 
+# Other activation codes are reserved until the NPU implements them.
+ACTIVATION_TO_CODE = {"none": 0b000, "relu": 0b001}
+RESERVED_ACTIVATION_CODES = {"sigmoid": 0b010, "tanh": 0b011}
+CONV_DTYPE_CODES = {
+    "INT8": 0b000, "INT4": 0b001, "FP16": 0b100,
+    "FP8": 0b101, "FP4": 0b110, "HSN": 0b111,
+}
+
 
 def parse_addr(value: str | int) -> int:
     return value if isinstance(value, int) else int(value, 16)
@@ -49,6 +57,7 @@ def encode_rconv(
     input_channels: int,
     output_channels: int,
     has_bias: bool,
+    activation: str = "none",
 ) -> Tuple[int, int]:
     kernel_key = tuple(kernel_size)
     if kernel_key not in KERNEL_SIZE_TO_CODE:
@@ -63,10 +72,12 @@ def encode_rconv(
         raise ValueError(f"conv feature width must be in [1, 1024], got {width}")
     if not 1 <= input_channels <= 1024:
         raise ValueError(f"conv input channels must be <= 1024, got {input_channels}")
-    if not 1 <= output_channels <= 8:
-        raise ValueError(f"conv output channels per pass must be <= 8, got {output_channels}")
+    if not 1 <= output_channels <= 32:
+        raise ValueError(f"conv output channels per pass must be in [1, 32], got {output_channels}")
     if not 0 <= start_position <= 31:
         raise ValueError(f"conv start_position must fit in 5 bits, got {start_position}")
+    if activation not in ACTIVATION_TO_CODE:
+        raise NotImplementedError(f"conv activation {activation!r} is reserved; only none/relu are implemented")
 
     rconv1 = (
         (KERNEL_SIZE_TO_CODE[kernel_key] << 30)
@@ -77,7 +88,7 @@ def encode_rconv(
         | ((output_channels - 1) << 2)
         | ((1 if has_bias else 0) << 1)
     )
-    rconv2 = (start_position & 0x1F) << 16
+    rconv2 = (start_position << 16) | (ACTIVATION_TO_CODE[activation] << 13)
     return rconv1, rconv2
 
 
@@ -88,6 +99,8 @@ def compile_op(op_plan: Dict[str, Any], memory_plan: Dict[str, Any]) -> List[str
     input_addr = parse_addr(op_plan["input_addr"])
     output_addr = parse_addr(op_plan["output_addr"])
     weight_addr = parse_addr(op_plan["weight_addr"])
+    if op_plan.get("dtype", "INT8").upper() != "INT8":
+        raise NotImplementedError("CONV currently implements INT8 only; other dtype codes are reserved")
     rconv1, rconv2 = encode_rconv(
         kernel_size=op_plan["kernel_size"],
         padding=op_plan["padding"],
@@ -97,6 +110,7 @@ def compile_op(op_plan: Dict[str, Any], memory_plan: Dict[str, Any]) -> List[str
         input_channels=int(op_plan["input_channels"]),
         output_channels=int(op_plan["output_channels"]),
         has_bias=bool(op_plan.get("has_bias", False)),
+        activation=op_plan.get("activation", "none"),
     )
     rconv1_low16, rconv1_high16 = split_u32(rconv1)
     rconv2_low16, rconv2_high16 = split_u32(rconv2)
@@ -116,6 +130,8 @@ def compile_op(op_plan: Dict[str, Any], memory_plan: Dict[str, Any]) -> List[str
         f"CFG_REGISTER CONV_P_2, 0x{rconv1_high16:04X}",
         f"CFG_REGISTER CONV_P_3, 0x{rconv2_low16:04X}",
         f"CFG_REGISTER CONV_P_4, 0x{rconv2_high16:04X}",
-        "CONV R1, R2, R3",
     ]
+    # RRELU is still configured independently, but must be ready before CONV.
+    asm += op_plan.get("activation_config_asm", [])
+    asm.append("CONV R1, R2, R3")
     return asm

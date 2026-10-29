@@ -9,6 +9,8 @@ import re
 from pathlib import Path
 from typing import List
 
+from memory_layout import CHANNEL_ALIGNMENT, aligned_channels
+
 
 NUMBER_RE = re.compile(
     r"""
@@ -37,14 +39,8 @@ def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def align_up(value: int, alignment: int = 4) -> int:
-    if value <= 0:
-        raise ValueError("channel count must be positive")
-    return ((value + alignment - 1) // alignment) * alignment
-
-
-def pad_to_multiple_of_4(values: List[float]) -> List[float]:
-    pad_num = (-len(values)) % 4
+def pad_to_multiple_of_8(values: List[float]) -> List[float]:
+    pad_num = (-len(values)) % CHANNEL_ALIGNMENT
     return values + [0.0] * pad_num if pad_num else values
 
 
@@ -54,7 +50,7 @@ def bias_values_to_words(bias_values: List[float], out_ch: int) -> List[int]:
         raise ValueError(f"bias count mismatch: file has {len(biases)} values, expected out_ch={out_ch}")
 
     words: List[int] = []
-    for index, value in enumerate(pad_to_multiple_of_4(biases)):
+    for index, value in enumerate(pad_to_multiple_of_8(biases)):
         rounded = round(value)
         if abs(value - rounded) > 1e-6:
             raise ValueError(f"bias[{index}]={value!r} is not an integer value and cannot be emitted as raw int32")
@@ -124,7 +120,7 @@ def main() -> None:
         bias_path = args.model_params / f"layer{layer}_0_bias.txt"
         output_path = args.out_dir / f"layer{layer}_bias.coe"
         raw_biases = parse_numbers(bias_path)
-        expected_aligned = align_up(out_ch, 4)
+        expected_aligned = aligned_channels(out_ch)
         if aligned_out_ch != expected_aligned:
             raise ValueError(
                 f"{tensor_name} aligned_channels={aligned_out_ch}, expected {expected_aligned} for out_ch={out_ch}"
