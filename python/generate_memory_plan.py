@@ -1507,7 +1507,7 @@ def plan_conv_unit(
         "storage_shape_oihw": [out_ch, aligned_in_ch, kh, kw],
         "size_bytes": weight_size,
         "parameter_region": f"{layer_name}_params",
-        "layout": "output_channel_then_kernel_hw_then_all_input_channels_padded_to_8",
+        "layout": "output_channel_then_input_channel_group_then_kernel_hw_then_8_channels",
         "stride_bytes": aligned_in_ch * kh * kw + (8 if has_bias else 0),
     }
     plan["tensors"][f"{layer_name}_weight"] = weight_tensor

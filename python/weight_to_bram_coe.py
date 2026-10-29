@@ -105,10 +105,12 @@ def convert_weights(
 
     emitted: List[int] = []
     for oc in range(out_ch):
-        for kh in range(kernel_h):
-            for kw in range(kernel_w):
-                for ic in range(pad_in_ch):
-                    emitted.append(signed_to_unsigned_twos_complement(int(padded[oc, ic, kh, kw])))
+        for group_start in range(0, pad_in_ch, 8):
+            for kh in range(kernel_h):
+                for kw in range(kernel_w):
+                    for lane in range(8):
+                        ic = group_start + lane
+                        emitted.append(signed_to_unsigned_twos_complement(int(padded[oc, ic, kh, kw])))
     return emitted, pad_in_ch, out_ch
 
 

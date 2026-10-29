@@ -101,3 +101,7 @@ expected_output.coe/.mem 是输出的相对布局；输出实际起始地址见�
 Input bytes: channel group -> row -> column -> eight channels. Channels 1..8 for all pixels precede channels 9..16. Little-endian storage is unchanged.
 
 Conv scale=11; accumulator range=[-244122, 229129]; shifted range=[-120, 111]. Apply this arithmetic shift before taking 8 bits and applying LeakyReLU. Parameter bytes, addresses, weights, bias, seed and all other operator settings are unchanged.
+
+## Weight layout update
+
+Weight order: output channel -> input channel group -> kernel row -> kernel column -> eight channel lanes. For each output, all 3x3 positions of channels 1..8 precede all 3x3 positions of channels 9..16. Zero padding, bias bytes and placement, addresses, input, instructions, scale and expected output are unchanged.

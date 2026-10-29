@@ -4,7 +4,7 @@ Both versions share identical input, weights and expected output. Addresses are 
 aligned64 aligns input, parameters and instructions to 64 bytes; unaligned64 uses 8-byte alignment.
 
 Each valid output channel: all its weights -> int32 little-endian bias -> four ZERO bytes.
-Weights: kh -> kw -> input channel (input channels padded to a multiple of 8).
+Weights: output channel -> input channel group -> kh -> kw -> eight channel lanes (zero padded).
 No dummy output-channel parameter records. Output features are still padded to 8 channels.
 
 |Case|Input|Parameters|First bias|Instruction entry|Output|Parameter bytes|Minimum BRAM depth|
@@ -25,3 +25,7 @@ Reference validated with vector and independent scalar calculations. RTL simulat
 Input bytes: channel group -> row -> column -> eight channels. Channels 1..8 for all pixels precede channels 9..16. Little-endian storage is unchanged.
 
 Conv scale=11; accumulator range=[-190964, 184596]; shifted range=[-94, 90]. Apply this arithmetic shift before taking 8 bits and applying LeakyReLU. Parameter bytes, addresses, weights, bias, seed and all other operator settings are unchanged.
+
+## Weight layout update
+
+Weight order: output channel -> input channel group -> kernel row -> kernel column -> eight channel lanes. For each output, all 3x3 positions of channels 1..8 precede all 3x3 positions of channels 9..16. Zero padding, bias bytes and placement, addresses, input, instructions, scale and expected output are unchanged.

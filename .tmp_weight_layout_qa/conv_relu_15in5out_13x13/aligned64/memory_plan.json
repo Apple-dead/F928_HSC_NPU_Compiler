@@ -1,0 +1,418 @@
+{
+  "config": {
+    "INIT_BASE_ADDR": "0x00000040",
+    "INIT_LIMIT_ADDR": "0x00010000",
+    "RUNTIME_BASE_ADDR": "0x00010000",
+    "RUNTIME_LIMIT_ADDR": "0x00020000",
+    "ENABLE_OUTPUT_ADDR": true,
+    "OUTPUT_BASE_ADDR": "0x00000E38",
+    "OUTPUT_LIMIT_ADDR": "0x00010000",
+    "IMAGE_BASE_ADDR": "0x00000040",
+    "IMAGE_SOURCE": "coe",
+    "IMAGE_PATH": "input.coe",
+    "MODEL_FORMAT": "ir",
+    "MODEL_PATH": "model_ir.json",
+    "INTR_MOVE_PATH": "intr_move.json",
+    "INPUT_HEIGHT": 13,
+    "INPUT_WIDTH": 13,
+    "INFER_PARSE_MODE": 1,
+    "INFER_PARSE_OP_LIMIT": 6,
+    "model_ir": "model_ir.json",
+    "EXAMPLE_INIT_REGION_ALIGNMENT_BYTES": 64
+  },
+  "relu": {
+    "mode": "leaky_relu",
+    "negative_slope": 0.125,
+    "tan": 3
+  },
+  "alignment_bytes": 64,
+  "channel_alignment": 8,
+  "feature_layout": "pixel_interleaved_all_channels_padded_to_8",
+  "bram_word_bytes": 64,
+  "image": {
+    "source": "coe",
+    "addr": "0x00000040",
+    "input_layer": "layer1",
+    "channels": 15,
+    "aligned_channels": 16,
+    "shape_nchw": [
+      1,
+      15,
+      13,
+      13
+    ],
+    "aligned_shape_nchw": [
+      1,
+      16,
+      13,
+      13
+    ],
+    "size_bytes": 2704,
+    "file": "input.coe",
+    "layout": "channel_group_then_h_then_w_then_8_channels"
+  },
+  "model_layers": [
+    {
+      "op_type": "conv",
+      "conv_index": 1,
+      "layer_index": 1,
+      "layer": "layer1",
+      "input": "x",
+      "output": "conv_out",
+      "has_relu": true,
+      "conv": {
+        "in_channels": 15,
+        "out_channels": 5,
+        "kernel_size": [
+          3,
+          3
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "padding": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true
+      },
+      "relu": {
+        "tan": 3
+      },
+      "relu_output": "y"
+    }
+  ],
+  "model_ops": [
+    {
+      "id": 1,
+      "op": "conv2d",
+      "name": "conv",
+      "layer_index": 1,
+      "input": "x",
+      "output": "conv_out",
+      "in_channels": 15,
+      "out_channels": 5,
+      "kernel_size": [
+        3,
+        3
+      ],
+      "padding": [
+        1,
+        1
+      ],
+      "stride": [
+        1,
+        1
+      ],
+      "dilation": [
+        1,
+        1
+      ],
+      "groups": 1,
+      "has_bias": true,
+      "output_shape": [
+        1,
+        5,
+        13,
+        13
+      ]
+    },
+    {
+      "id": 2,
+      "op": "relu",
+      "name": "leaky_relu",
+      "input": "conv_out",
+      "output": "y",
+      "negative_slope": 0.125,
+      "tan": 3,
+      "output_shape": [
+        1,
+        5,
+        13,
+        13
+      ]
+    }
+  ],
+  "model_output_values": [
+    {
+      "index": 0,
+      "name": "y"
+    }
+  ],
+  "tensors": {
+    "image": {
+      "source": "coe",
+      "addr": "0x00000040",
+      "input_layer": "layer1",
+      "channels": 15,
+      "aligned_channels": 16,
+      "shape_nchw": [
+        1,
+        15,
+        13,
+        13
+      ],
+      "aligned_shape_nchw": [
+        1,
+        16,
+        13,
+        13
+      ],
+      "size_bytes": 2704,
+      "file": "input.coe",
+      "layout": "channel_group_then_h_then_w_then_8_channels"
+    },
+    "layer1_weight": {
+      "addr": "0x00000B00",
+      "channels": {
+        "in": 15,
+        "out": 5
+      },
+      "aligned_channels": {
+        "in": 16,
+        "out": 8
+      },
+      "shape_oihw": [
+        5,
+        15,
+        3,
+        3
+      ],
+      "storage_shape_oihw": [
+        5,
+        16,
+        3,
+        3
+      ],
+      "size_bytes": 720,
+      "parameter_region": "layer1_params",
+      "layout": "output_channel_then_input_channel_group_then_kernel_hw_then_8_channels",
+      "stride_bytes": 152
+    },
+    "layer1_bias": {
+      "addr": "0x00000B90",
+      "channels": 5,
+      "aligned_channels": 8,
+      "shape": [
+        5
+      ],
+      "storage_shape": [
+        5,
+        8
+      ],
+      "stride_bytes": 152,
+      "value_size_bytes": 4,
+      "padding_bytes_per_value": 4,
+      "size_bytes": 40,
+      "parameter_region": "layer1_params",
+      "layout": "strided_int32_le_bias_then_32_zero_bits"
+    },
+    "layer1_params": {
+      "addr": "0x00000B00",
+      "size_bytes": 760,
+      "has_bias": true,
+      "layout": "per_output_weight_then_int32_le_bias_then_32_zero_bits"
+    },
+    "layer1_conv_out": {
+      "name": "layer1_conv_out",
+      "addr": "0x00000E38",
+      "size_bytes": 1352,
+      "end_addr_exclusive": "0x00001380",
+      "channels": 5,
+      "aligned_channels": 8,
+      "shape_nchw": [
+        1,
+        5,
+        13,
+        13
+      ],
+      "aligned_shape_nchw": [
+        1,
+        8,
+        13,
+        13
+      ],
+      "layout": "pixel_interleaved_all_channels_padded_to_8",
+      "is_model_output": true,
+      "output_index": 0,
+      "output_value": "y"
+    },
+    "instr": {
+      "name": "instr",
+      "addr": "0x00000E00",
+      "size_bytes": 56,
+      "end_addr_exclusive": "0x00000E38",
+      "file": "instr.coe"
+    }
+  },
+  "execution_plan": [
+    {
+      "conv_index": 1,
+      "layer": "layer1",
+      "npu_max_channels_per_pass": 32,
+      "channel_group_max_channels": 32,
+      "input_feature_elements": 2704,
+      "output_feature_elements": 1352,
+      "channel_alignment": 8,
+      "feature_layout": "pixel_interleaved_all_channels_padded_to_8",
+      "activation": "relu",
+      "dtype": "INT8",
+      "input_channels": 15,
+      "output_channels": 5,
+      "aligned_input_channels": 16,
+      "aligned_output_channels": 8,
+      "kernel_size": [
+        3,
+        3
+      ],
+      "padding": [
+        1,
+        1
+      ],
+      "stride": [
+        1,
+        1
+      ],
+      "has_bias": true,
+      "has_relu": true,
+      "input_hw": [
+        13,
+        13
+      ],
+      "conv_output_hw": [
+        13,
+        13
+      ],
+      "has_dsmp": false,
+      "output_hw": [
+        13,
+        13
+      ],
+      "reserved_regions": {
+        "conv_out": {
+          "addr": "0x00000E38",
+          "size_bytes": 1352,
+          "layout": "pixel_interleaved_all_channels_padded_to_8"
+        }
+      },
+      "splits": [
+        {
+          "group_index": 0,
+          "start_channel": 0,
+          "channels": 8,
+          "valid_channels": 5,
+          "has_padding": true,
+          "offsets_bytes": {
+            "weight": 0,
+            "conv_output": 0,
+            "dsmp_output": null,
+            "bias": 144,
+            "output": 0
+          },
+          "size_bytes": {
+            "weight": 720,
+            "conv_output": 1352,
+            "dsmp_output": null,
+            "bias": 40,
+            "output": 1352
+          },
+          "conv": {
+            "input_addr": "0x00000040",
+            "weight_addr": "0x00000B00",
+            "output_addr": "0x00000E38",
+            "has_bias": true
+          },
+          "parameter_record_stride_bytes": 152,
+          "bias_addr": "0x00000B90"
+        }
+      ],
+      "relu": {
+        "feature_size": 13,
+        "channels": 5,
+        "fused_into": "conv",
+        "tan": 3
+      }
+    }
+  ],
+  "init_regions": [
+    {
+      "name": "image",
+      "addr": "0x00000040",
+      "size_bytes": 2704,
+      "end_addr_exclusive": "0x00000AD0",
+      "file": "input.coe"
+    },
+    {
+      "name": "layer1_params",
+      "addr": "0x00000B00",
+      "size_bytes": 760,
+      "end_addr_exclusive": "0x00000DC8",
+      "file": "params.coe",
+      "has_bias": true,
+      "layout": "per_output_weight_then_int32_le_bias_then_32_zero_bits"
+    },
+    {
+      "name": "instr",
+      "addr": "0x00000E00",
+      "size_bytes": 56,
+      "end_addr_exclusive": "0x00000E38",
+      "file": "instr.coe"
+    }
+  ],
+  "runtime_regions": [],
+  "output_regions": [
+    {
+      "name": "output0_layer1_conv_out",
+      "addr": "0x00000E38",
+      "size_bytes": 1352,
+      "end_addr_exclusive": "0x00001380",
+      "is_model_output": true,
+      "output_index": 0,
+      "output_value": "y",
+      "output_tensor": "layer1_conv_out",
+      "source": null,
+      "channels": 5,
+      "aligned_channels": 8,
+      "shape_nchw": [
+        1,
+        5,
+        13,
+        13
+      ],
+      "aligned_shape_nchw": [
+        1,
+        8,
+        13,
+        13
+      ],
+      "shape": null,
+      "layout": "pixel_interleaved_all_channels_padded_to_8"
+    }
+  ],
+  "aliases": [],
+  "model_outputs": [
+    {
+      "index": 0,
+      "name": "y",
+      "tensor": "layer1_conv_out",
+      "addr": "0x00000E38",
+      "size_bytes": 1352,
+      "end_addr_exclusive": "0x00001380",
+      "shape": [
+        1,
+        5,
+        13,
+        13
+      ]
+    }
+  ],
+  "init_end_addr_exclusive": "0x00000E38",
+  "runtime_end_addr_exclusive": "0x00010000",
+  "output_end_addr_exclusive": "0x00001380"
+}

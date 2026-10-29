@@ -208,7 +208,7 @@ def build_case(out_dir: Path, name: str, input_addr: int, x, weights, bias, stag
     stored_truncated = np.zeros_like(stored_accumulator)
     stored_truncated[:, :, :output_channels] = truncated
     input_bytes = pack_input_hwc8(stored_input)
-    weight_bytes = stored_weights.tobytes(order="C")
+    weight_bytes = b"".join(pack_input_hwc8(stored_weights[oc]) for oc in range(output_channels))
     record_weight_bytes = KERNEL * KERNEL * stored_input_channels
     record_stride = record_weight_bytes + 8
     expected_parameters = b"".join(
@@ -327,6 +327,7 @@ def build_case(out_dir: Path, name: str, input_addr: int, x, weights, bias, stag
         "input_weight_bias_random_value_dtype": "signed_int8", "bias_storage_dtype": "signed_int32_le",
         "slope": "1/8", "tan": 3, "start_bit": scale,
         "input_layout": "channel_group_then_h_then_w_then_8_channels",
+        "weight_layout": "output_channel_then_input_channel_group_then_kernel_hw_then_8_channels",
         "accumulator_range": [int(accumulator.min()), int(accumulator.max())],
         "scaled_range": [int(truncated.min()), int(truncated.max())],
         "compute_order": "int32_sum_plus_bias -> arithmetic_shift_right_scale -> signed_int8 -> negative_arithmetic_shift_right_3",
@@ -464,6 +465,7 @@ def write_matrix_reference(path: Path, x, weights, bias, expected, summaries: li
         f"kernel=3×3，padding=1，stride=1，bias 启用，scale={summaries[0]['start_bit']}，slope=1/8。",
         f"累加范围：{summaries[0]['accumulator_range']}；移位后范围：{summaries[0]['scaled_range']}。",
         "计算顺序：乘加+bias → 按scale算术右移后取8位 → 负数算术右移3位。",
+        "权重内存：输出通道→输入通道组→核行→核列→组内8通道；本TXT仍按逻辑通道显示矩阵。",
     ]
     for item in summaries:
         lines.append(f"{item['case']}：输入 {item['input_addr']}，指令 {item['instruction_entry_addr']}，输出 {item['output_addr']}。")
@@ -493,7 +495,7 @@ def write_layout_readme(out_dir: Path, summaries: list[dict]) -> None:
              "Both versions share identical input, weights and expected output. Addresses are byte addresses.",
              "aligned64 aligns input, parameters and instructions to 64 bytes; unaligned64 uses 8-byte alignment.", "",
              "Each valid output channel: all its weights -> int32 little-endian bias -> four ZERO bytes.",
-             "Weights: kh -> kw -> input channel (input channels padded to a multiple of 8).",
+             "Weights: output channel -> input channel group -> kh -> kw -> eight channel lanes (zero padded).",
              "No dummy output-channel parameter records. Output features are still padded to 8 channels.", "",
              "|Case|Input|Parameters|First bias|Instruction entry|Output|Parameter bytes|Minimum BRAM depth|",
              "|---|---|---|---|---|---|---|---|"]

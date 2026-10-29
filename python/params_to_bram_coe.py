@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Generate Conv parameters: per output, HWC8 weights then int32 LE bias + 4 zero bytes.
+"""Generate Conv parameters: per output, grouped HWC8 weights then int32 LE bias + 4 zero bytes.
 
 No dummy output-channel parameter records are stored. Linear keeps its own layout.
 """
