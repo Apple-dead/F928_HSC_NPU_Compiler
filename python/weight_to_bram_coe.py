@@ -11,7 +11,7 @@ from typing import List, Tuple
 
 import numpy as np
 
-from memory_layout import CONV_MAX_OUTPUT_CHANNELS, aligned_channels
+from memory_layout import CONV_MAX_OUTPUT_CHANNELS, aligned_channels, conv_channel_groups
 
 
 NUMBER_RE = re.compile(r"[-+]?(?:\d+\.\d*|\d*\.\d+|\d+)(?:[eE][-+]?\d+)?")
@@ -73,11 +73,7 @@ def write_coe(words: List[int], output_path: Path, values_per_line: int = 1) -> 
 def npu_channel_groups(
     out_ch: int, aligned_out_ch: int, max_channels: int = CONV_MAX_OUTPUT_CHANNELS,
 ) -> List[Tuple[int, int, int, bool]]:
-    if not 1 <= out_ch <= max_channels:
-        raise NotImplementedError(f"pixel-interleaved Conv currently supports 1..{max_channels} output channels")
-    if aligned_out_ch != aligned_channels(out_ch):
-        raise ValueError(f"expected 8-channel padding for {out_ch}, got {aligned_out_ch}")
-    return [(0, aligned_out_ch, out_ch, out_ch < aligned_out_ch)]
+    return conv_channel_groups(out_ch, aligned_out_ch, max_channels)
 
 
 def convert_weights(

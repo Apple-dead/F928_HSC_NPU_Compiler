@@ -72,8 +72,8 @@ def encode_rconv(
         raise ValueError(f"conv feature width must be in [1, 1024], got {width}")
     if not 1 <= input_channels <= 1024:
         raise ValueError(f"conv input channels must be <= 1024, got {input_channels}")
-    if not 1 <= output_channels <= 32:
-        raise ValueError(f"conv output channels per pass must be in [1, 32], got {output_channels}")
+    if not 1 <= output_channels <= 8:
+        raise ValueError(f"conv output channels per pass must be in [1, 8], got {output_channels}; split output channels first")
     if not 0 <= start_position <= 31:
         raise ValueError(f"conv start_position must fit in 5 bits, got {start_position}")
     if activation not in ACTIVATION_TO_CODE:

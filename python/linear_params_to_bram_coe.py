@@ -7,8 +7,9 @@ from __future__ import annotations
 from typing import List
 
 import numpy as np
+from memory_layout import CHANNEL_ALIGNMENT, FEATURE_LAYOUT
 
-from weight_to_bram_coe import check_int8_range, read_weight_txt, signed_to_unsigned_twos_complement
+from weight_to_bram_coe import check_int8_range, read_weight_txt
 
 
 def convert_linear_weights(
@@ -19,7 +20,10 @@ def convert_linear_weights(
     input_height: int,
     input_width: int,
     aligned_input_channels: int,
+    input_layout: str = FEATURE_LAYOUT,
 ) -> List[int]:
+    if input_layout != FEATURE_LAYOUT:
+        raise ValueError(f"FULL requires {FEATURE_LAYOUT}, got {input_layout!r}; regenerate the memory plan")
     actual_features = input_channels * input_height * input_width
     expected_max = out_features * actual_features
     if flat_values.size % out_features != 0:
@@ -37,7 +41,7 @@ def convert_linear_weights(
         raise ValueError(
             f"aligned_input_channels={aligned_input_channels} must be >= input_channels={input_channels}"
         )
-    if aligned_input_channels % 8 != 0:
+    if aligned_input_channels % CHANNEL_ALIGNMENT != 0:
         raise ValueError(f"FULL input channels must be padded to a multiple of 8, got {aligned_input_channels}")
 
     check_int8_range(flat_values)
@@ -52,17 +56,10 @@ def convert_linear_weights(
         out_features, input_channels, input_height, input_width
     )
 
-    emitted: List[int] = []
-    for output_index in range(out_features):
-        for row in range(input_height):
-            for col in range(input_width):
-                for channel in range(aligned_input_channels):
-                    emitted.append(
-                        signed_to_unsigned_twos_complement(
-                            int(padded[output_index, channel, row, col])
-                        )
-                    )
-    return emitted
+    # Every producer uses the same grouping, including pooling/DSMP/USMP/image.
+    return (padded.reshape(out_features, aligned_input_channels // CHANNEL_ALIGNMENT,
+                           CHANNEL_ALIGNMENT, input_height, input_width)
+            .transpose(0, 1, 3, 4, 2).astype(np.int8).view(np.uint8).reshape(-1).tolist())
 
 
 __all__ = ["convert_linear_weights", "read_weight_txt"]

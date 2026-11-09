@@ -3,7 +3,8 @@
 """
 image_to_bram_coe.py
 
-将输入图像整理为每个像素连续存放全部通道、补零到 8 通道的 NPU 输入布局。
+将输入图像整理为“通道组 → H → W → 组内 8 通道”的 NPU 输入布局。
+先存完通道 1–8 的所有像素，再存通道 9–16；最后一组不足 8 通道补零。
 
 支持的图像模式：
   - L    : 每像素灰度值后补 7 个零
@@ -21,7 +22,7 @@ import argparse
 from pathlib import Path
 from typing import Iterable, List
 
-from memory_layout import aligned_channels
+from memory_layout import aligned_channels, pack_feature_hwc
 
 try:
     from PIL import Image
@@ -74,19 +75,14 @@ def write_coe(words: List[int], output_path: Path, radix: int, word_bytes: int, 
 
 
 def image_to_rgba_like_bytes(image_path: Path) -> tuple[bytes, str]:
-    """读取实际 H/W；每个像素存完原始通道后补零到 8 的倍数。"""
+    """读取实际 H/W，按 8 通道组打包；当前图像模式均只占一组。"""
     with Image.open(image_path) as img:
         mode = img.mode
         if mode not in IMAGE_CHANNELS:
             raise ValueError(f"不支持的图像模式：{mode}。要求 L/RGB/RGBA/RGBX。")
         channels = IMAGE_CHANNELS[mode]
         raw = img.tobytes()
-        padding = bytes(aligned_channels(channels) - channels)
-        out = bytearray()
-        for i in range(0, len(raw), channels):
-            out.extend(raw[i : i + channels])
-            out.extend(padding)
-        return bytes(out), mode
+        return pack_feature_hwc(raw, height=img.height, width=img.width, channels=channels), mode
 
 
 def parse_args() -> argparse.Namespace:

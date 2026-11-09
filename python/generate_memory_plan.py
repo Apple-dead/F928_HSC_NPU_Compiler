@@ -13,7 +13,7 @@ import npu_config as cfg
 from frontend.ir_schema import BACKEND_SUPPORTED_OPS
 from memory_layout import (
     BRAM_WORD_BYTES, CHANNEL_ALIGNMENT, CONV_MAX_OUTPUT_CHANNELS,
-    FEATURE_LAYOUT, aligned_channels,
+    FEATURE_LAYOUT, aligned_channels, conv_channel_groups,
 )
 
 
@@ -112,7 +112,7 @@ def conv_output_hw(height: int, width: int, conv: Dict[str, Any]) -> tuple[int, 
 def instr_count_for_execution_plan(execution_plan: List[Dict[str, Any]]) -> int:
     total = 1
     for stage in execution_plan:
-        if stage.get("op_type") == "usmp":
+        if stage.get("op_type") in ("usmp", "dsmp"):
             total += 7 * len(stage.get("splits", []))
             continue
         if stage.get("op_type") == "linear":
@@ -182,17 +182,10 @@ def addr_to_int(addr: str) -> int:
 def npu_channel_groups(
     out_ch: int, aligned_out_ch: int, max_channels: int = CONV_MAX_OUTPUT_CHANNELS,
 ) -> List[Dict[str, Any]]:
-    if not 1 <= out_ch <= max_channels:
-        raise NotImplementedError(
-            f"conv output channels must be in [1, {max_channels}] for pixel-interleaved storage; "
-            f"got {out_ch}. Multi-pass output needs an NPU channel-stride/writeback definition."
-        )
-    if aligned_out_ch != aligned_channels(out_ch):
-        raise ValueError(f"expected 8-channel padding for {out_ch}, got {aligned_out_ch}")
-    return [{
-        "group_index": 0, "start_channel": 0, "channels": aligned_out_ch,
-        "valid_channels": out_ch, "has_padding": out_ch != aligned_out_ch,
-    }]
+    return [{"group_index": index, "start_channel": start, "channels": stored,
+             "valid_channels": valid, "has_padding": padded}
+            for index, (start, stored, valid, padded) in enumerate(
+                conv_channel_groups(out_ch, aligned_out_ch, max_channels))]
 
 
 def build_layer_execution_plan(
@@ -570,26 +563,26 @@ def build_cat_aliases(ir: Dict[str, Any]) -> Dict[str, Any]:
             continue
         height = int(cat_shape["height"])
         width = int(cat_shape["width"])
-        # With HWC storage, whole-buffer channel concatenation aliases only a
-        # single spatial position. Larger maps require pixel-strided writes.
-        if height * width != 1:
-            continue
+        # Whole HWC8 groups are contiguous for any spatial size. Padding may
+        # occur only in the final input segment, at the end of the cat output.
         output_channels = int(cat_shape["channels"])
         aligned_output_ch = int(cat_shape["aligned_channels"])
-        if output_channels != aligned_output_ch:
+        if len(set(inputs)) != len(inputs):
             continue
 
         offset = 0
         input_infos: List[Dict[str, Any]] = []
         can_alias = True
-        for input_value in inputs:
+        logical_channels = 0
+        for input_index, input_value in enumerate(inputs):
             input_shape = shapes.get(input_value)
             if input_shape is None:
                 can_alias = False
                 break
             channels = int(input_shape["channels"])
             aligned_ch = int(input_shape["aligned_channels"])
-            if int(input_shape["height"]) != height or int(input_shape["width"]) != width or channels != aligned_ch:
+            if (int(input_shape["height"]) != height or int(input_shape["width"]) != width
+                    or (channels != aligned_ch and input_index != len(inputs) - 1)):
                 can_alias = False
                 break
             size = height * width * aligned_ch
@@ -605,7 +598,9 @@ def build_cat_aliases(ir: Dict[str, Any]) -> Dict[str, Any]:
                 }
             )
             offset += size
-        if not can_alias or offset != height * width * aligned_output_ch:
+            logical_channels += channels
+        if (not can_alias or logical_channels != output_channels
+                or offset != height * width * aligned_output_ch):
             continue
 
         tensor_name = f"{op.get('name', 'cat')}_out"
@@ -781,6 +776,13 @@ def relocate_model_outputs(
                 "output_value": value_name,
             }
         )
+        # Cat producers share this buffer. Keep their tensor metadata in step
+        # with execution addresses when the whole cat output is relocated.
+        for alias_tensor in plan["tensors"].values():
+            if alias_tensor.get("alias_of") == tensor_name:
+                alias_addr = cursor + int(alias_tensor["alias_offset_bytes"])
+                alias_tensor["addr"] = hex_addr(alias_addr)
+                alias_tensor["end_addr_exclusive"] = hex_addr(alias_addr + int(alias_tensor["size_bytes"]))
         output_regions.append(new_region)
         model_outputs.append(
             {
@@ -791,6 +793,7 @@ def relocate_model_outputs(
                 "size_bytes": size,
                 "end_addr_exclusive": new_region["end_addr_exclusive"],
                 "shape": tensor.get("shape_nchw", tensor.get("shape")),
+                "layout": tensor.get("layout", FEATURE_LAYOUT),
             }
         )
         cursor += size
@@ -811,8 +814,8 @@ def validate_input_coe_size(file_text: str, expected_size: int, expected_shape: 
             f"{path}: input COE size mismatch for start-layer input; "
             f"file has {actual_size} bytes ({len(values)} 32-bit words), "
             f"expected {expected_size} bytes for aligned_shape_nchw={expected_shape}. "
-            "Input COE must use per-pixel all-channel order padded to 8 channels; "
-            "regenerate legacy 4-channel input COEs. Intermediate COEs remain 32-bit."
+            "Input COE must use channel group -> H -> W -> eight lanes, padding only the last group; "
+            "all pixels of ch1..8 precede ch9..16. Intermediate COEs remain 32-bit."
         )
 
 
@@ -1272,9 +1275,9 @@ def plan_cat_unit(
     alias = plan.get("_cat_output_tensors", {}).get(str(unit.get("output")))
     if alias is None:
         raise NotImplementedError(
-            f"{layer_name}: channel cat cannot use whole-buffer aliases with the new pixel-interleaved "
-            "layout. Only 1x1 maps with unpadded input channel segments can alias; "
-            "larger maps require an NPU pixel-strided write/copy instruction."
+            f"{layer_name}: channel cat requires distinct input segments on eight-channel group "
+            "boundaries with matching H/W. Only the last input may have channel padding; "
+            "other cases require data repacking."
         )
     cat_tensor = ensure_cat_output_tensor(plan, alias)
     for segment in alias["input_infos"]:
@@ -1355,9 +1358,10 @@ def plan_linear_unit(
         "shape_oi": [out_features, in_features],
         "input_shape_nchw": [1, input_ch, input_h, input_w],
         "input_aligned_shape_nchw": [1, aligned_input_ch, input_h, input_w],
+        "input_layout": input_tensor.get("layout", FEATURE_LAYOUT),
         "size_bytes": out_features * input_bytes,
         "parameter_region": f"{layer_name}_params",
-        "layout": "per_output_pixel_interleaved_all_input_channels_padded_to_8",
+        "layout": "per_output_channel_group_then_h_then_w_then_8_channels",
     }
     if has_bias:
         plan["tensors"][f"{layer_name}_bias"] = {
@@ -1427,6 +1431,7 @@ def plan_linear_unit(
             "input_features": in_features,
             "output_features": out_features,
             "input_channels": input_ch,
+            "feature_layout": FEATURE_LAYOUT,
             "aligned_input_channels": aligned_input_ch,
             "input_hw": [input_h, input_w],
             "input_bytes": input_bytes,
@@ -1560,6 +1565,7 @@ def plan_conv_unit(
             aligned_channels=aligned_out_ch,
             shape_nchw=[1, out_ch, region_h, region_w],
             aligned_shape_nchw=[1, aligned_out_ch, region_h, region_w],
+            layout=FEATURE_LAYOUT,
         )
         plan["tensors"][tensor_name] = runtime
         runtime_tensors[op_name] = runtime

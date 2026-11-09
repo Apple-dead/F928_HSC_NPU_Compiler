@@ -34,6 +34,7 @@ SINGLE_OPERATOR_STAGES = {
     "avgpool": ["avgpool"],
     "maxpool": ["maxpool"],
     "usmp": ["usmp"],
+    "dsmp": ["dsmp"],
 }
 
 
@@ -144,7 +145,7 @@ def build_dsmp_op_plan(
     common: Dict[str, Any],
     intr_moves: Dict[str, Dict[int, int]],
 ) -> Dict[str, Any]:
-    common.update(layer_plan["dsmp"])
+    common.update(split.get("dsmp", layer_plan.get("dsmp", {})))
     return common
 
 
@@ -155,6 +156,8 @@ def build_relu_op_plan(
     intr_moves: Dict[str, Dict[int, int]],
 ) -> Dict[str, Any]:
     common.update(layer_plan["relu"])
+    # Activation is fused into this CONV pass, so configure only its channels.
+    common["channels"] = split["valid_channels"]
     return common
 
 

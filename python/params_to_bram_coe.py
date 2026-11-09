@@ -89,6 +89,7 @@ def generate_linear_params(layer_plan: dict, tensors: dict, model_params: Path, 
         input_height=input_height,
         input_width=input_width,
         aligned_input_channels=aligned_input_channels,
+        **({"input_layout": weight_tensor["input_layout"]} if "input_layout" in weight_tensor else {}),
     )
     input_bytes = aligned_input_channels * input_height * input_width
     has_bias = bool(layer_plan.get("has_bias", False))

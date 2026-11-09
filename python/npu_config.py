@@ -24,8 +24,9 @@ IMAGE_BASE_ADDR = 0x10000000
 #                map is already available at IMAGE_BASE_ADDR, and initialized
 #                params/instructions start at INIT_BASE_ADDR.
 IMAGE_SOURCE = "coe"
-# Input COE is a 32-bit intermediate file using per-pixel all-channel order,
-# padded to 8 channels. Regenerate old 4-channel COEs before building.
+# Input COE is a 32-bit intermediate file ordered as channel group -> H -> W
+# -> eight lanes: all pixels of ch1..8 precede all pixels of ch9..16.
+# Pad only the last channel group. External feature maps use the same layout.
 # Only the final target/all.coe is packed into 512-bit entries.
 IMAGE_PATH = "./coe/image.coe"
 
@@ -47,6 +48,6 @@ EXPAND_FINAL_CAT_OUTPUTS = True
 
 INSTR_WORD_BYTES = 4
 
-# Feature maps store all channels per pixel and pad channels to a multiple of
-# 8. CONV handles up to 32 output channels in one pass; old 4/8-channel output
-# splitting and its feature-size threshold no longer apply.
+# CONV emits at most 8 output channels per pass (16 outputs -> 8 + 8).
+# Each pass writes one contiguous H x W x 8 block; the final pass pads to 8.
+# Parameter records contain only valid outputs; no dummy output weights/biases.
